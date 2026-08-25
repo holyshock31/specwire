@@ -27,7 +27,6 @@ openspec validate             # 校验全部
 |---|---|---|
 | Bridge | `bridge/` | Go，Docker Compose 部署（`docker compose up -d`），GitLab webhook → Multica |
 | 客户端 Skills | 独立 SpecWire Skills 管理 | 负责发起、执行、评审、合并、归档；消费 SpecWire 协议，不定义 Bridge 行为 |
-| 旧文档 | `.old/` | 历史交接/设计文档归档（内容已被 openspec specs 取代） |
 
 ## 文档职责
 
@@ -35,6 +34,17 @@ openspec validate             # 校验全部
 - `CONTEXT.md` 与 `docs/adr/` 分别维护领域边界/术语和已接受的架构理由。
 - `docs/specwire-next-requirements.md` 是平台路线图与运维沉淀，不是当前行为契约；其中每项要落地的要求都必须先建立 OpenSpec change。
 - 客户端 Skills 文档只定义如何消费 SpecWire 协议，不定义 Bridge 行为。
+
+## GitHub Release
+
+GitLab 是源码入口，GitHub 通过 mirror 接收分支和 tag。普通 `main` push 或 Pull Request 会触发 CI；发布版本时创建并推送 `v*` tag，mirror 将 tag 同步到 GitHub 后，Release workflow 会运行 Bridge 测试并自动创建 GitHub Release。
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Release 使用 GitHub 自动生成修改说明，并提供该 tag 的源码归档；当前项目没有 npm/Electron 类分发制品。
 
 ## 管理页面（bridge-admin-ui）
 
