@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpecWire Bridge 管理</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f5f6f8; color: #1c1e21; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 8px 0; }
+  .chip { background: #e8eaed; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+  .chip.ok { background: #d3f0d3; color: #1a7f37; }
+  .chip.bad { background: #fbdcdc; color: #b42318; }
+  .banner { background: #fff3cd; border: 1px solid #ffe08a; border-radius: 8px; padding: 10px 14px; margin: 12px 0; display: none; }
+  .banner code { background: #ffeecb; padding: 1px 6px; border-radius: 4px; }
+  .card { background: #fff; border: 1px solid #e0e2e5; border-radius: 10px; padding: 14px 16px; margin: 14px 0; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #eee; vertical-align: middle; }
+  th { color: #666; font-weight: 600; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  button { border: 0; border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; background: #2d7ff9; color: #fff; }
+  button:hover { opacity: .9; }
+  button.danger { background: #d93025; }
+  button.ghost { background: #e8eaed; color: #1c1e21; }
+  button:disabled { opacity: .5; cursor: wait; }
+  input, select { padding: 6px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+  .form-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .form-row input[type=text] { flex: 1; min-width: 220px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag { font-size: 11px; border-radius: 4px; padding: 1px 6px; }
+  .tag.yes { background: #d3f0d3; color: #1a7f37; }
+  .tag.no { background: #fbdcdc; color: #b42318; }
+  .tag.na { background: #eee; color: #666; }
+  .hint { color: #666; font-size: 12px; margin-top: 6px; }
+  .err { color: #b42318; font-size: 13px; margin: 6px 0; }
+  .okmsg { color: #1a7f37; font-size: 13px; margin: 6px 0; }
+  .tokenrow { display: none; align-items: center; gap: 8px; margin: 8px 0; }
+  .tokenrow input { width: 220px; }
+  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #333; color: #fff; padding: 8px 16px; border-radius: 8px; display: none; font-size: 13px; z-index: 9; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>SpecWire Bridge 管理</h1>
+    <span class="chip" id="chip-gitlab">GitLab …</span>
+    <span class="chip" id="chip-multica">Multica …</span>
+    <span class="chip" id="chip-secrets">tokens …</span>
+    <span class="chip" id="chip-default">默认项目 …</span>
+  </header>
+
+  <div class="tokenrow" id="tokenrow">
+    <label>Admin token</label>
+    <input type="password" id="admintoken" placeholder="SPECWIRE_ADMIN_TOKEN（bridge/.env）">
+    <button class="ghost" onclick="saveToken()">保存</button>
+    <span class="hint" id="tokenhint">未授权：请输入 admin token 后才能查看/修改配置（保存在本机浏览器）</span>
+  </div>
+
+  <div class="banner" id="restart-banner">
+    ⚠️ 配置已写入 env 文件，需要 <b>重启生效</b>：<code>docker compose up -d</code>（会自动重建容器并重新加载配置）
+  </div>
+
+  <div class="card">
+    <h2>项目</h2>
+    <table>
+      <thead><tr>
+        <th>GitLab 项目</th><th>Multica 项目</th><th>Hook 状态</th><th>Token</th><th>操作</th>
+      </tr></thead>
+      <tbody id="projects"></tbody>
+    </table>
+    <div class="hint">Hook 缺失时可点击「创建 Hook」自动生成专属 token 并在 GitLab 配置 push+issues 事件。</div>
+  </div>
+
+  <div class="card">
+    <h2>添加项目</h2>
+    <div class="form-row">
+      <input type="text" id="new-path" placeholder="GitLab 项目路径，如 personal/webdeck">
+      <select id="new-multica"></select>
+      <button onclick="addProject()">添加</button>
+    </div>
+    <div class="hint">添加后项目进入 allowlist 与映射；GitLab 项目与 Multica project 均需存在。</div>
+  </div>
+
+  <div class="card">
+    <h2>配置持久化</h2>
+    <p class="hint">将当前配置（allowlist / 映射 / signing tokens）原子写回 env 文件。保存后需重启容器生效（无热加载）。</p>
+    <button onclick="apply()">保存配置到 env 文件</button>
+    <div id="apply-result"></div>
+  </div>
+
+  <div class="err" id="err"></div>
+  <div class="okmsg" id="okmsg"></div>
+</div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const TOKEN_KEY = "specwire_admin_token";
+let config = null;
+
+function toast(msg) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.style.display = "block";
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.style.display = "none", 4000);
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+async function api(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (token) opts.headers["X-Admin-Token"] = token;
+  const res = await fetch(path, opts);
+  if (res.status === 401) {
+    // 未授权：显示 token 输入行与提示，请求 token 后重试一次
+    document.getElementById("tokenrow").style.display = "flex";
+    document.getElementById("admintoken").focus();
+    throw new Error("unauthorized");
+  }
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* non-json */ }
+  if (!res.ok) {
+    throw new Error((body && body.error) || ("HTTP " + res.status));
+  }
+  return body;
+}
+
+function saveToken() {
+  localStorage.setItem(TOKEN_KEY, document.getElementById("admintoken").value.trim());
+  document.getElementById("tokenrow").style.display = "none";
+  toast("token 已保存");
+  load();
+}
+
+function render() {
+  document.getElementById("chip-gitlab").textContent = "GitLab " + (config.gitlab_configured ? "已配置" : "未配置");
+  document.getElementById("chip-gitlab").className = "chip " + (config.gitlab_configured ? "ok" : "bad");
+  document.getElementById("chip-multica").textContent = config.multica_error ? "Multica 错误" : "Multica " + config.multica_projects.length + " 项目";
+  document.getElementById("chip-multica").className = "chip " + (config.multica_error ? "bad" : "ok");
+  document.getElementById("chip-secrets").textContent = "tokens " + config.secret_count;
+  document.getElementById("chip-default").textContent = "默认项目 " + config.default_multica_project_id;
+
+  const banner = document.getElementById("restart-banner");
+  banner.style.display = config.restart_required ? "block" : "none";
+
+  // 项目表
+  const tbody = document.getElementById("projects");
+  tbody.innerHTML = "";
+  for (const p of config.projects) {
+    const tr = document.createElement("tr");
+    let hookHtml, hookTag;
+    if (!p.hook) {
+      hookHtml = "—"; hookTag = "";
+    } else if (p.hook.error) {
+      hookHtml = esc(p.hook.error); hookTag = "na";
+    } else if (p.hook.exists) {
+      hookHtml = "存在 (#" + p.hook.id + ")" + (p.hook.push_events && p.hook.issues_events ? "" : "，事件不全!");
+      hookTag = "yes";
+    } else {
+      hookHtml = "缺失"; hookTag = "no";
+    }
+    tr.innerHTML =
+      "<td class='mono'>" + esc(p.path) + "</td>" +
+      "<td class='mono'>" + esc(p.multica_project_id) + "</td>" +
+      "<td><span class='tag " + hookTag + "'>" + hookHtml + "</span></td>" +
+      "<td>" + (p.secret_source === "dedicated" ? "<span class='tag yes'>专属</span>"
+                : p.secret_source === "shared" ? "<span class='tag yes'>共享</span>"
+                : "<span class='tag no'>无</span>") + "</td>" +
+      "<td><div class='actions'>" +
+        (p.hook && p.hook.exists
+          ? "<button onclick='rotateHook(\"" + esc(p.path) + "\")'>轮换 token</button>"
+          : "<button onclick='upsertHook(\"" + esc(p.path) + "\")'>创建 Hook</button>") +
+        "<button class='danger' onclick='removeProject(\"" + esc(p.path) + "\")'>移除</button>" +
+      "</div></td>";
+    tbody.appendChild(tr);
+  }
+
+  // Multica 下拉
+  const sel = document.getElementById("new-multica");
+  sel.innerHTML = "";
+  for (const m of config.multica_projects) {
+    const opt = document.createElement("option");
+    opt.value = m.title || m.id;
+    opt.textContent = m.title + " (" + m.id.slice(0, 8) + "…)";
+    sel.appendChild(opt);
+  }
+  if (config.multica_projects.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = ""; opt.textContent = config.multica_error || "无可用项目";
+    sel.appendChild(opt);
+  }
+}
+
+async function load() {
+  try {
+    config = await api("/admin/api/config");
+    render();
+    document.getElementById("err").textContent = "";
+  } catch (e) {
+    if (e.message === "unauthorized") {
+      document.getElementById("err").textContent = "未授权：请在下方输入 admin token（SPECWIRE_ADMIN_TOKEN，见 bridge/.env）";
+    } else {
+      document.getElementById("err").textContent = "加载配置失败：" + e.message;
+    }
+  }
+}
+
+function withBusy(btn, fn) {
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "处理中…";
+  return fn().finally(() => { btn.disabled = false; btn.textContent = old; });
+}
+
+async function addProject() {
+  const path = document.getElementById("new-path").value.trim();
+  const multica = document.getElementById("new-multica").value;
+  if (!path || !multica) { toast("请填写项目路径并选择 Multica 项目"); return; }
+  try {
+    const r = await api("/admin/api/projects", { method: "POST", body: JSON.stringify({ gitlab_path: path, multica_project: multica }) });
+    document.getElementById("new-path").value = "";
+    toast("已添加 " + r.path);
+    await load();
+  } catch (e) { document.getElementById("err").textContent = "添加失败：" + e.message; }
+}
+
+async function removeProject(path) {
+  if (!confirm("确认移除项目 " + path + "？将同时删除其 allowlist 与映射条目（历史卡不受影响）。")) return;
+  try {
+    await api("/admin/api/projects/" + path.split("/").map(encodeURIComponent).join("/"), { method: "DELETE" });
+    toast("已移除 " + path);
+    await load();
+  } catch (e) { document.getElementById("err").textContent = "移除失败：" + e.message; }
+}
+
+async function upsertHook(path) {
+  try {
+    const r = await api("/admin/api/hooks/" + path.split("/").map(encodeURIComponent).join("/"), { method: "POST" });
+    toast("已创建/更新 hook（#" + r.hook_id + "）并生成专属 token");
+    await load();
+  } catch (e) { document.getElementById("err").textContent = "创建 hook 失败：" + e.message; }
+}
+
+async function rotateHook(path) {
+  if (!confirm("确认轮换项目 " + path + " 的 signing token？旧 token 将立即失效。")) return;
+  try {
+    const r = await api("/admin/api/hooks/" + path.split("/").map(encodeURIComponent).join("/") + "/rotate", { method: "POST" });
+    if (r.warning) toast(r.warning); else toast("token 已轮换（#" + r.hook_id + "）");
+    await load();
+  } catch (e) { document.getElementById("err").textContent = "轮换失败：" + e.message; }
+}
+
+async function apply() {
+  const btn = event.target;
+  withBusy(btn, async () => {
+    try {
+      const r = await api("/admin/api/apply", { method: "POST" });
+      document.getElementById("apply-result").innerHTML =
+        "<div class='okmsg'>" + esc(r.message) + "</div>";
+      await load();
+    } catch (e) {
+      document.getElementById("err").textContent = "保存失败：" + e.message;
+    }
+  });
+}
+
+load();
+</script>
+</body>
+</html>

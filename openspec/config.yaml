@@ -1,0 +1,36 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+context: |
+  SpecWire：GitLab 与 Multica 之间的集成边界（PoC）；本地 Skills 和 Agent 是独立客户端。
+  - 组件：SpecWire Bridge（Go，Docker Compose 部署，GitLab Issue Hook → Multica 建卡；archived Push Hook → 完成投影并关闭 GitLab Issue）。
+  - 基础设施：GitLab CE 19.1（http://gitlab.specwire.local:8929，容器 specwire-net 网络）；
+    Multica self-host（127.0.0.1:28080）；本机 macOS。
+  - 事件模型：GitLab Issue Hook（action=open、label=change）负责新发布；main 上的 archived Push Hook 只负责完成。
+  - 关键约定：稳定键 <path>:<change>:<branch_head_sha>:<project_id>（四段）；项目映射 SPECWIRE_PROJECT_MAP；
+    发布者按次指定 SpecWire-Status/Assignee；branch_head_sha 是冻结基线；issue_links 保存发布 Issue 关联。
+  - 端到端场景：本地 Skill 创建 feat/fix 分支并运行 opsx:propose、commit/push、创建 GitLab Issue；Multica/Agent 执行与 MR 评审属于客户端/执行系统；archive Skill push 后由 Bridge 完成投影和 Issue 闭环。
+  - 文档语言：中文为主，术语保留英文。
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+rules:
+  proposal:
+    - 动机必须关联 Issue 发布或 archived Push Hook 与投影闭环
+    - 标注对 Bridge/本地 skill/Agent 侧的影响
+  tasks:
+    - 每个任务可独立验证（含测试或联调步骤）
+    - 涉及部署的任务必须包含重新 build 与端到端验证
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+operations:
+  apply:
+    guidance:
+      - 按 tasks.md 分组推进，Bridge 改动必须带测试（go test -race）
+      - 完成后重新 build 镜像并部署（docker compose build && up -d）
+  archive:
+    guidance:
+      - 归档提交必须带 archived trailer 并 push main
+      - 归档后核对 Multica 卡 done 与（v2）GitLab Issue 关闭

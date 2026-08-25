@@ -1,0 +1,43 @@
+#!/bin/sh
+# SpecWire Bridge 测试用假 multica CLI。
+# 契约见 SPECWIRE_BRIDGE_TEST_CASES.md §1.1：
+#   FAKE_MULTICA_ARGV_FILE  把全部 argv（每行一个参数）写入该文件，供测试断言
+#   FAKE_MULTICA_STDIN_FILE 把 stdin 原样写入该文件，供测试断言 description
+#   FAKE_MULTICA_EXIT_CODE  退出码（默认 0）
+#   FAKE_MULTICA_DELAY      sleep 秒数（模拟 CLI 超时）
+#   FAKE_MULTICA_PROJECTS_JSON  `project list` 时输出的 JSON 数组（默认 SpecWire PoC + WebDeck）
+set -u
+
+if [ -n "${FAKE_MULTICA_ARGV_FILE:-}" ]; then
+  : > "$FAKE_MULTICA_ARGV_FILE"
+  for a in "$@"; do
+    printf '%s\n' "$a" >> "$FAKE_MULTICA_ARGV_FILE"
+  done
+fi
+
+if [ -n "${FAKE_MULTICA_STDIN_FILE:-}" ]; then
+  cat > "$FAKE_MULTICA_STDIN_FILE"
+fi
+
+if [ -n "${FAKE_MULTICA_DELAY:-}" ]; then
+  sleep "$FAKE_MULTICA_DELAY"
+fi
+
+code="${FAKE_MULTICA_EXIT_CODE:-0}"
+if [ "$code" != "0" ]; then
+  exit "$code"
+fi
+
+# admin API：project list → 项目数组（JSON 数组，非单对象）
+case " $* " in
+  *" project list "*)
+    if [ -z "${FAKE_MULTICA_PROJECTS_JSON:-}" ]; then
+      FAKE_MULTICA_PROJECTS_JSON='[{"id":"3e7d61cd-900b-41a8-85f4-c97019e2020f","title":"SpecWire PoC"},{"id":"59f6006a-4b60-4219-b736-e7c3d4befd19","title":"WebDeck"}]'
+    fi
+    printf '%s\n' "$FAKE_MULTICA_PROJECTS_JSON"
+    exit 0
+    ;;
+esac
+
+printf '{"id":"WW1-fake-123"}\n'
+exit 0

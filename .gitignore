@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Local Go caches
+/.gocache/
+/.gomod/
+
+# Go build artifacts
+/bridge/bridge
+/bridge/*.test
+
+# Local runtime state and credentials
+/bridge/.env.bak-*
+/bridge/data/bridge.env
+/bridge/data/admin-state.json
+/bridge/data/*.db
+/bridge/data/*.db-wal
+/bridge/data/*.db-shm

@@ -1,0 +1,5 @@
+# SpecWire Bridge 本地文件
+*.db
+*.db-wal
+*.db-shm
+.env

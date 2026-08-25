@@ -1,0 +1,37 @@
+# SpecWire Bridge 部署：Docker Compose
+# 依赖：
+#   - 宿主 Multica self-host（127.0.0.1:28080，经 host.docker.internal 访问）
+#   - 宿主 profile ~/.multica/profiles/specwire-local（只读挂载，含 token）
+#   - GitLab webhook URL 不变：http://host.docker.internal:8787/gitlab/specwire
+services:
+  bridge:
+    build: .
+    container_name: specwire-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+      # admin 页面「保存配置」写回的目标（挂载卷，随 data/ 持久化）；
+      # 后列覆盖前列，apply 后 docker compose up -d 即以新值重建容器。
+      - data/bridge.env
+    environment:
+      - HOME=/multica
+      # 覆盖 profile config.json 中写死的 127.0.0.1:28080（容器内 localhost 不通）
+      - MULTICA_SERVER_URL=http://host.docker.internal:28080
+      - SPECWIRE_DB_PATH=/app/data/specwire-bridge.db
+      - SPECWIRE_ADMIN_ENV_PATH=/app/data/bridge.env
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/app/data
+      - ~/.multica/profiles/specwire-local:/multica/.multica/profiles/specwire-local:ro
+    networks:
+      - specwire-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  specwire-net:
+    external: true

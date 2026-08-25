@@ -1,0 +1,10 @@
+{
+  "object_kind": "push",
+  "ref": "refs/heads/main",
+  "after": "494dd55ad996a61a486c206041a25d039e137966",
+  "project": { "id": 1, "path_with_namespace": "specwire/specwire-poc" },
+  "head_commit": {
+    "id": "494dd55ad996a61a486c206041a25d039e137966",
+    "message": "spec(add-user-login): archive completed change\n\nSpecWire-Event: archived\nSpecWire-Change: add-user-login\n"
+  }
+}

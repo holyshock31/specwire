@@ -1,0 +1,10 @@
+# 构建上下文排除（.env 含 secret，绝不进镜像）
+.env
+*.db
+*.db-wal
+*.db-shm
+data/
+bridge
+scripts/
+testdata/
+*.md
