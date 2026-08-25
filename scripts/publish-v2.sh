@@ -39,8 +39,8 @@ if [ -z "$GITLAB_TOKEN" ]; then
   echo "✗ SPECWIRE_GITLAB_TOKEN 未设置（创建 GitLab Access Token，scope: issues）" >&2
   exit 1
 fi
-# 宿主视角 GitLab API 地址（默认 127.0.0.1:8929；容器内 Bridge 用 gitlab.specwire.local）
-GITLAB_URL="${SPECWIRE_GITLAB_URL:-http://127.0.0.1:8929}"
+# 宿主视角 GitLab API 地址（统一使用 GitLab canonical host）
+GITLAB_URL="${SPECWIRE_GITLAB_URL:-http://gitlab.specwire.test:8929}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"

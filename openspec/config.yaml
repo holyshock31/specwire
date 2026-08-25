@@ -5,7 +5,7 @@ schema: spec-driven
 context: |
   SpecWire：GitLab 与 Multica 之间的集成边界（PoC）；本地 Skills 和 Agent 是独立客户端。
   - 组件：SpecWire Bridge（Go，Docker Compose 部署，GitLab Issue Hook → Multica 建卡；archived Push Hook → 完成投影并关闭 GitLab Issue）。
-  - 基础设施：GitLab CE 19.1（http://gitlab.specwire.local:8929，容器 specwire-net 网络）；
+  - 基础设施：GitLab CE 19.1（http://gitlab.specwire.test:8929，容器 specwire-net 网络）；
     Multica self-host（127.0.0.1:28080）；本机 macOS。
   - 事件模型：GitLab Issue Hook（action=open、label=change）负责新发布；main 上的 archived Push Hook 只负责完成。
   - 关键约定：稳定键 <path>:<change>:<branch_head_sha>:<project_id>（四段）；项目映射 SPECWIRE_PROJECT_MAP；

@@ -75,7 +75,7 @@ func LoadConfig() (*Config, error) {
 	cfg.LogLevel = level
 
 	cfg.GitLabToken = os.Getenv("SPECWIRE_GITLAB_TOKEN")
-	cfg.GitLabURL = getenv("SPECWIRE_GITLAB_URL", "http://gitlab.specwire.local:8929")
+	cfg.GitLabURL = getenv("SPECWIRE_GITLAB_URL", "http://gitlab.specwire.test:8929")
 	cfg.WebhookURL = getenv("SPECWIRE_WEBHOOK_URL", "http://host.docker.internal:8787/gitlab/specwire")
 	cfg.AdminToken = os.Getenv("SPECWIRE_ADMIN_TOKEN")
 
