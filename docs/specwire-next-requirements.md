@@ -74,6 +74,6 @@
 |---|---|---|---|
 | F-1 | Bridge per-project 凭证（2.1） | 高 | specwire 仓库 openspec change |
 | F-2 | archived 幂等与失败告警（2.2） | 中 | 同上（可与 F-1 合并） |
-| F-3 | 备份基线脚本化（2.3） | 中 | scripts/ 下 cron 脚本 + 文档 |
+| F-3 | 备份基线脚本化（2.3） | 中 | 独立运维 Skill + 文档 |
 | F-4 | 凭证轮换 SOP 文档（2.3/3） | 中 | docs/ 独立 SOP |
 | F-5 | 多项目管理 Runbook 自动化（1.2 脚本化） | 低 | skill（类似 init/review/merge/archive 的 specwire 侧 skill） |

@@ -44,9 +44,11 @@ _Avoid_: workflow UI, project-management system
 
 The end-to-end scenario in the project diagram is a client workflow around SpecWire, not an expansion of the SpecWire runtime boundary:
 
+![SpecWire GitLab–Multica client workflow](assets/specwire-gitlab-multica-client-workflow-v2.png)
+
 1. A locally managed Skill starts a change in an agent session/worktree: it creates a `feat`/`fix` branch, runs `opsx:propose`, commits and pushes the branch, then opens a GitLab Issue with the `change` label and the `change_id`, `branch`, and `branch_head_sha` fields.
 2. The GitLab Issue Hook delivers that publication to SpecWire. SpecWire validates the event, creates the Multica execution projection with the branch context, and applies the requested initial status or assignment. Other issue platforms are outside the current supported target.
 3. Multica and the client Agent handle checkout, implementation, MR delivery, human review, and merge. These are client/execution-system responsibilities, not SpecWire Bridge behavior.
 4. The archive Skill synchronizes the merged `main`, runs the repository's archive operation, and pushes the archive event. SpecWire receives the `archived` Push Hook, completes the Multica projection, and closes the linked GitLab publication Issue.
 
-The diagram's `tag: change` wording should be read as: the GitLab Issue carries the `change` label. In the canonical GitLab protocol, this is an Issue label (`labels[].title == "change"`), not a Git tag or a generic webhook field. The diagram is a scenario reference and does not make the local Skills, Agent session, review, merge, notification, or archive command part of SpecWire's runtime contract.
+The diagram's `label: change` wording means that the GitLab Issue carries the `change` label. In the canonical GitLab protocol, this is an Issue label (`labels[].title == "change"`), not a Git tag or a generic webhook field. The diagram is a scenario reference and does not make the local Skills, Agent session, review, merge, notification, or archive command part of SpecWire's runtime contract.

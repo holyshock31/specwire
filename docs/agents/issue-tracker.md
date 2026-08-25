@@ -4,7 +4,7 @@
 
 Use GitLab Issues for work items and lifecycle tracking.
 
-This is an existing repository convention, established by the OpenSpec v2 workflow and the `publish-v2.sh` / `publish-change` skills:
+This is an existing repository convention consumed by the separately managed SpecWire Skills:
 
 - publishing a change creates a GitLab Issue with the `change` label;
 - the Issue description carries `change_id`, `branch`, and `branch_head_sha`;
@@ -17,7 +17,7 @@ The `change` label is a workflow/publication label, not a triage label.
 
 When Git metadata is available, resolve the project from the upstream GitLab remote. If the checkout has no remote or is an exported workspace, set `SPECWIRE_GITLAB_PROJECT=<group/project>` explicitly before using a publisher or API client. Never infer or invent a project path from the directory name.
 
-This repository currently has no local `.git` metadata, so the explicit `SPECWIRE_GITLAB_PROJECT` path is required for operations that address a GitLab project.
+In a normal checkout, resolve the project from the upstream Git remote. The explicit `SPECWIRE_GITLAB_PROJECT` path is only required when Git metadata or the upstream remote is unavailable.
 
 ## Local artifacts
 
