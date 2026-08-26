@@ -74,6 +74,30 @@ func TestMappingAndFilterAreRestrictedDeclarativeOperations(t *testing.T) {
 	}
 }
 
+func TestRegisteredModelCanBeUsedByDeclarativeParseNormalize(t *testing.T) {
+	model := domain.DataModelDefinition{
+		Key: "CustomEvent", Version: "v1", DisplayName: "Custom Event", AllowExtensions: true,
+		Schema: map[string]any{"type": "object", "properties": map[string]any{
+			"event_id": map[string]any{"type": "string"},
+			"attempt":  map[string]any{"type": "integer"},
+		}}, RequiredFields: []string{"event_id"},
+	}
+	catalog := NewCatalog(nil, []domain.DataModelDefinition{model}, nil)
+	output, err := ParseNormalizeWithCatalog(map[string]any{"event_id": "evt-1", "attempt": float64(2), "extra": "kept"}, "CustomEvent.v1", RuntimeContext{}, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output["event_id"] != "evt-1" || output["extensions"] == nil {
+		t.Fatalf("custom model output = %#v", output)
+	}
+	if _, err := ParseNormalizeWithCatalog(map[string]any{"attempt": 1.5}, "CustomEvent.v1", RuntimeContext{}, catalog); err == nil {
+		t.Fatal("missing required field or fractional integer was accepted")
+	}
+	if _, err := ParseNormalizeWithCatalog(map[string]any{"event_id": 42}, "CustomEvent.v1", RuntimeContext{}, catalog); err == nil {
+		t.Fatal("wrong model field type was accepted")
+	}
+}
+
 func hasDiagnostic(result ValidationResult, code string) bool {
 	for _, diagnostic := range result.Diagnostics {
 		if diagnostic.Code == code || strings.Contains(diagnostic.Message, code) {

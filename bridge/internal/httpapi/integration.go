@@ -28,6 +28,7 @@ type IntegrationStore interface {
 	CreateGitLabGroupBinding(context.Context, domain.GitLabGroupBinding) error
 	GetGitLabGroupBinding(context.Context, domain.ID, domain.ID) (domain.GitLabGroupBinding, error)
 	GetGitLabGroupBindingByGroup(context.Context, domain.ID, domain.ID, string) (domain.GitLabGroupBinding, error)
+	GetCredentialProfile(context.Context, domain.ID, domain.ID) (domain.CredentialProfile, error)
 	ListFlows(context.Context, domain.ID, domain.ID) ([]domain.Flow, error)
 	GetFlow(context.Context, domain.ID, domain.ID) (domain.Flow, error)
 	GetFlowDraft(context.Context, domain.ID, domain.ID) (domain.FlowGraph, error)
@@ -51,6 +52,7 @@ type IntegrationServices struct {
 	Store       IntegrationStore
 	Selection   *controlplane.SelectionService
 	Connections *controlplane.ConnectionService
+	Credentials *controlplane.CredentialService
 	Flows       *flow.Service
 	Registry    *controlplane.RegistryService
 }
@@ -68,7 +70,13 @@ func (s *Server) handleIntegration(w http.ResponseWriter, r *http.Request, path 
 		return true
 	}
 	switch parts[1] {
-	case "gitlab-instances", "multica-instances":
+	case "gitlab-instances":
+		if len(parts) >= 6 && parts[3] == "groups" && parts[5] == "credentials" {
+			s.handleGroupCredentials(w, r, session, parts)
+		} else {
+			s.handleSelectors(w, r, session, parts)
+		}
+	case "multica-instances":
 		s.handleSelectors(w, r, session, parts)
 	case "connections":
 		s.handleConnections(w, r, session, parts)
@@ -169,7 +177,7 @@ func (s *Server) handleSelectors(w http.ResponseWriter, r *http.Request, session
 	if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleViewer, false) {
 		return
 	}
-	if s.integration.Selection == nil || s.integration.Store == nil {
+	if s.integration.Selection == nil || s.integration.Store == nil || s.endpoints == nil {
 		writeError(w, fmt.Errorf("%w: selector service is not configured", domain.ErrInvalid))
 		return
 	}
@@ -200,7 +208,14 @@ func (s *Server) handleSelectors(w http.ResponseWriter, r *http.Request, session
 				return
 			}
 			group := provider.GitLabGroup{InstanceID: instanceID, ExternalID: groupID, FullPath: strings.TrimSpace(r.URL.Query().Get("group_path")), Name: strings.TrimSpace(r.URL.Query().Get("group_name"))}
-			items, err := s.integration.Selection.GitLabProjects(r.Context(), instance, group, query, instance.CredentialRef)
+			credentialRef := instance.CredentialRef
+			if binding, bindingErr := s.integration.Store.GetGitLabGroupBindingByGroup(r.Context(), workspaceID, instanceID, groupID); bindingErr == nil && binding.CredentialRef != nil {
+				credentialRef = binding.CredentialRef
+			} else if bindingErr != nil && !errors.Is(bindingErr, domain.ErrNotFound) {
+				writeError(w, bindingErr)
+				return
+			}
+			items, err := s.integration.Selection.GitLabProjects(r.Context(), instance, group, query, credentialRef)
 			if err != nil {
 				writeError(w, err)
 				return
@@ -245,6 +260,143 @@ func (s *Server) handleSelectors(w http.ResponseWriter, r *http.Request, session
 		return
 	}
 	http.NotFound(w, r)
+}
+
+type groupCredentialRequest struct {
+	Alias                string                       `json:"alias"`
+	Kind                 domain.CredentialProfileKind `json:"kind"`
+	Secret               string                       `json:"secret"`
+	RequiredCapabilities []string                     `json:"required_capabilities,omitempty"`
+}
+
+func (s *Server) handleGroupCredentials(w http.ResponseWriter, r *http.Request, session domain.Session, parts []string) {
+	if s.integration == nil || s.integration.Store == nil || s.integration.Credentials == nil || s.endpoints == nil {
+		writeError(w, fmt.Errorf("%w: Group credential service is not configured", domain.ErrInvalid))
+		return
+	}
+	if len(parts) < 6 || parts[3] != "groups" || parts[5] != "credentials" {
+		http.NotFound(w, r)
+		return
+	}
+	workspaceID := domain.ID(parts[0])
+	instanceID := domain.ID(parts[2])
+	groupExternalID := strings.TrimSpace(parts[4])
+	if groupExternalID == "" {
+		writeError(w, fmt.Errorf("%w: GitLab Group external ID is required", domain.ErrInvalid))
+		return
+	}
+	instance, err := s.endpoints.GetGitLab(r.Context(), workspaceID, instanceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	binding, bindingErr := s.integration.Store.GetGitLabGroupBindingByGroup(r.Context(), workspaceID, instanceID, groupExternalID)
+	if bindingErr != nil && !errors.Is(bindingErr, domain.ErrNotFound) {
+		writeError(w, bindingErr)
+		return
+	}
+	if r.Method == http.MethodGet {
+		if len(parts) != 6 {
+			http.NotFound(w, r)
+			return
+		}
+		if bindingErr != nil {
+			writeError(w, bindingErr)
+			return
+		}
+		if !s.authorize(w, r, session, workspaceID, domain.RoleViewer, auth.Scope{Type: "gitlab_group", ID: domain.ID(groupExternalID)}) {
+			return
+		}
+		var profile any
+		if !binding.CredentialProfileID.Empty() {
+			loaded, profileErr := s.integration.Store.GetCredentialProfile(r.Context(), workspaceID, binding.CredentialProfileID)
+			if profileErr != nil && !errors.Is(profileErr, domain.ErrNotFound) {
+				writeError(w, profileErr)
+				return
+			}
+			if profileErr == nil {
+				profile = loaded
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"binding": binding, "credential_profile": profile})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.authorizeMutation(w, r, session, workspaceID, domain.RoleOperator, auth.Scope{Type: "gitlab_group", ID: domain.ID(groupExternalID)}) {
+		return
+	}
+	var request groupCredentialRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if len(parts) == 8 && parts[7] == "rotate" {
+		if bindingErr != nil {
+			writeError(w, bindingErr)
+			return
+		}
+		if domain.ID(parts[6]) != binding.CredentialProfileID {
+			writeError(w, fmt.Errorf("%w: credential profile is not bound to this Group", domain.ErrForbidden))
+			return
+		}
+		profile, profileErr := s.integration.Store.GetCredentialProfile(r.Context(), workspaceID, binding.CredentialProfileID)
+		if profileErr != nil {
+			writeError(w, profileErr)
+			return
+		}
+		if request.Alias == "" {
+			request.Alias = profile.Alias
+		}
+		if len(request.RequiredCapabilities) == 0 {
+			request.RequiredCapabilities = []string{"gitlab.projects.read"}
+		}
+		ref := domain.SecretRef{ID: domain.NewID(), WorkspaceID: workspaceID, Alias: strings.TrimSpace(request.Alias), Kind: domain.SecretGroupCredential}
+		rotated, err := s.integration.Credentials.RotateGroupCredential(r.Context(), instance, binding, ref, []byte(request.Secret), request.RequiredCapabilities)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		s.audit(r.Context(), session.AccountID, "credential.group.rotate", "credential_profile", rotated.ID, map[string]any{"workspace_id": workspaceID, "group_external_id": groupExternalID, "alias": rotated.Alias})
+		writeJSON(w, http.StatusOK, rotated)
+		return
+	}
+	if len(parts) != 6 {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.TrimSpace(request.Alias) == "" || strings.TrimSpace(request.Secret) == "" {
+		writeError(w, fmt.Errorf("%w: credential alias and secret are required", domain.ErrInvalid))
+		return
+	}
+	if bindingErr != nil {
+		binding = domain.GitLabGroupBinding{ID: domain.NewID(), WorkspaceID: workspaceID, GitLabInstanceID: instanceID, ExternalGroupID: groupExternalID, FullPath: firstNonEmpty(r.URL.Query().Get("group_path"), groupExternalID), InheritSubgroups: true, Status: domain.EndpointActive}
+		if err := s.integration.Store.CreateGitLabGroupBinding(r.Context(), binding); err != nil && !errors.Is(err, domain.ErrConflict) {
+			writeError(w, err)
+			return
+		}
+		binding, err = s.integration.Store.GetGitLabGroupBindingByGroup(r.Context(), workspaceID, instanceID, groupExternalID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	if request.Kind == "" {
+		request.Kind = domain.CredentialGroupAccessToken
+	}
+	if len(request.RequiredCapabilities) == 0 {
+		request.RequiredCapabilities = []string{"gitlab.projects.read"}
+	}
+	profileID := domain.NewID()
+	ref := domain.SecretRef{ID: domain.NewID(), WorkspaceID: workspaceID, Alias: strings.TrimSpace(request.Alias), Kind: domain.SecretGroupCredential}
+	profile, err := s.integration.Credentials.BindGroupCredential(r.Context(), instance, binding, profileID, request.Alias, request.Kind, ref, []byte(request.Secret), request.RequiredCapabilities)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r.Context(), session.AccountID, "credential.group.bind", "credential_profile", profile.ID, map[string]any{"workspace_id": workspaceID, "group_external_id": groupExternalID, "kind": profile.Kind, "alias": profile.Alias})
+	writeJSON(w, http.StatusCreated, profile)
 }
 
 type onboardingRequest struct {
@@ -629,19 +781,52 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request, session dom
 func (s *Server) handleFlowCollection(w http.ResponseWriter, r *http.Request, session domain.Session, workspaceID domain.ID, store IntegrationStore) {
 	switch r.Method {
 	case http.MethodGet:
-		if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleViewer, false) {
-			return
-		}
 		var connectionID domain.ID
 		if value := strings.TrimSpace(r.URL.Query().Get("connection_id")); value != "" {
 			connectionID = domain.ID(value)
+		}
+		if !connectionID.Empty() {
+			connection, err := store.GetConnection(r.Context(), workspaceID, connectionID)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			if !s.authorizeConnection(w, r, session, connection, domain.RoleViewer, false) {
+				return
+			}
+			items, err := store.ListFlows(r.Context(), workspaceID, connectionID)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, items)
+			return
+		}
+		if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleViewer, false) {
+			return
+		}
+		connections, err := store.ListConnections(r.Context(), workspaceID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		visible := s.visibleConnections(r.Context(), session, workspaceID, connections)
+		allowed := make(map[domain.ID]struct{}, len(visible))
+		for _, connection := range visible {
+			allowed[connection.ID] = struct{}{}
 		}
 		items, err := store.ListFlows(r.Context(), workspaceID, connectionID)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, items)
+		filtered := make([]domain.Flow, 0, len(items))
+		for _, item := range items {
+			if _, ok := allowed[item.ConnectionID]; ok {
+				filtered = append(filtered, item)
+			}
+		}
+		writeJSON(w, http.StatusOK, filtered)
 	case http.MethodPost:
 		var request createFlowRequest
 		if !decodeJSON(w, r, &request) {
@@ -700,10 +885,15 @@ func (s *Server) handleFlowDraft(w http.ResponseWriter, r *http.Request, session
 		writeJSON(w, http.StatusOK, draft)
 		return
 	}
-	if r.Method != http.MethodPut || s.integration.Flows == nil || !s.checkCSRFForMutation(w, r, session) {
-		if r.Method != http.MethodPut {
-			http.NotFound(w, r)
-		}
+	if r.Method != http.MethodPut {
+		http.NotFound(w, r)
+		return
+	}
+	if s.integration.Flows == nil {
+		writeError(w, fmt.Errorf("%w: Flow service is not configured", domain.ErrInvalid))
+		return
+	}
+	if !s.checkCSRFForMutation(w, r, session) {
 		return
 	}
 	var request struct {
@@ -960,13 +1150,17 @@ func (s *Server) replayExecution(w http.ResponseWriter, r *http.Request, session
 }
 
 func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request, session domain.Session, parts []string) {
-	if len(parts) != 3 || s.integration.Registry == nil {
+	if (len(parts) != 3 && len(parts) != 4) || s.integration.Registry == nil {
 		http.NotFound(w, r)
 		return
 	}
 	workspaceID := domain.ID(parts[0])
 	resource := parts[2]
 	if r.Method == http.MethodGet {
+		if len(parts) != 3 {
+			http.NotFound(w, r)
+			return
+		}
 		if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleViewer, false) {
 			return
 		}
@@ -990,10 +1184,42 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request, session 
 		writeJSON(w, http.StatusOK, value)
 		return
 	}
+	if len(parts) == 4 {
+		if r.Method != http.MethodPatch || !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleAdmin, true) {
+			return
+		}
+		var request struct {
+			Status domain.ConnectorStatus `json:"status"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		var err error
+		itemID := domain.ID(parts[3])
+		switch resource {
+		case "connector-types":
+			err = s.integration.Registry.SetConnectorTypeStatus(r.Context(), workspaceID, itemID, request.Status)
+		case "connector-behaviors":
+			err = s.integration.Registry.SetConnectorBehaviorStatus(r.Context(), workspaceID, itemID, request.Status)
+		case "data-models":
+			err = s.integration.Registry.SetDataModelStatus(r.Context(), workspaceID, itemID, request.Status)
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		s.audit(r.Context(), session.AccountID, "registry."+resource+".status", resource, itemID, map[string]any{"workspace_id": workspaceID, "status": request.Status})
+		writeJSON(w, http.StatusOK, map[string]any{"id": itemID, "status": request.Status})
+		return
+	}
 	if r.Method != http.MethodPost || !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleAdmin, true) {
 		return
 	}
 	var value any
+	var entityID domain.ID
 	switch resource {
 	case "connector-types":
 		var item domain.ConnectorType
@@ -1003,11 +1229,15 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request, session 
 		if item.ID.Empty() {
 			item.ID = domain.NewID()
 		}
+		if item.Status == "" {
+			item.Status = domain.DefinitionDraft
+		}
 		if err := s.integration.Registry.RegisterConnectorType(r.Context(), workspaceID, item); err != nil {
 			writeError(w, err)
 			return
 		}
 		value = item
+		entityID = item.ID
 	case "connector-behaviors":
 		var item domain.ConnectorBehavior
 		if !decodeJSON(w, r, &item) {
@@ -1016,11 +1246,15 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request, session 
 		if item.ID.Empty() {
 			item.ID = domain.NewID()
 		}
+		if item.Status == "" {
+			item.Status = domain.DefinitionDraft
+		}
 		if err := s.integration.Registry.RegisterConnectorBehavior(r.Context(), workspaceID, item); err != nil {
 			writeError(w, err)
 			return
 		}
 		value = item
+		entityID = item.ID
 	case "data-models":
 		var item domain.DataModelDefinition
 		if !decodeJSON(w, r, &item) {
@@ -1029,16 +1263,20 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request, session 
 		if item.ID.Empty() {
 			item.ID = domain.NewID()
 		}
+		if item.Status == "" {
+			item.Status = domain.DefinitionDraft
+		}
 		if err := s.integration.Registry.RegisterDataModel(r.Context(), workspaceID, item); err != nil {
 			writeError(w, err)
 			return
 		}
 		value = item
+		entityID = item.ID
 	default:
 		http.NotFound(w, r)
 		return
 	}
-	s.audit(r.Context(), session.AccountID, "registry."+resource+".register", resource, domain.NewID(), map[string]any{"workspace_id": workspaceID})
+	s.audit(r.Context(), session.AccountID, "registry."+resource+".register", resource, entityID, map[string]any{"workspace_id": workspaceID})
 	writeJSON(w, http.StatusCreated, value)
 }
 

@@ -89,6 +89,40 @@ func (s *Store) GetWorkspaceBySlug(ctx context.Context, slug string) (domain.Wor
 	return workspace, err
 }
 
+// ListWorkspacesForAccount exposes only active memberships.  The account is
+// intentionally the first authorization edge so a caller cannot enumerate
+// another account's Workspace IDs.
+func (s *Store) ListWorkspacesForAccount(ctx context.Context, accountID domain.ID) ([]domain.Workspace, error) {
+	if accountID.Empty() {
+		return nil, fmt.Errorf("%w: account_id is required", domain.ErrInvalid)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT w.id, w.slug, w.name, w.status, w.created_at, w.updated_at
+		FROM workspaces w JOIN workspace_memberships m ON m.workspace_id = w.id
+		WHERE m.account_id = ? AND m.status = 'active' ORDER BY w.name, w.id`, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("list account Workspaces: %w", err)
+	}
+	defer rows.Close()
+	var result []domain.Workspace
+	for rows.Next() {
+		var item domain.Workspace
+		var created, updated string
+		if err := rows.Scan(&item.ID, &item.Slug, &item.Name, &item.Status, &created, &updated); err != nil {
+			return nil, fmt.Errorf("scan account Workspace: %w", err)
+		}
+		item.CreatedAt, err = decodeTime(created)
+		if err != nil {
+			return nil, fmt.Errorf("decode Workspace created_at: %w", err)
+		}
+		item.UpdatedAt, err = decodeTime(updated)
+		if err != nil {
+			return nil, fmt.Errorf("decode Workspace updated_at: %w", err)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) CreateAccount(ctx context.Context, account domain.Account) error {
 	if account.Status == "" {
 		account.Status = domain.AccountActive

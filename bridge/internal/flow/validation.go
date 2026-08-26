@@ -1,7 +1,10 @@
 package flow
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -62,6 +65,128 @@ func (c Catalog) Model(ref string) (domain.DataModelDefinition, bool) {
 		}
 	}
 	return domain.DataModelDefinition{}, false
+}
+
+// ValidateModelValue validates a runtime value against a registered model
+// definition.  Values arriving from JSON are normally float64 for numbers,
+// so integer fields explicitly reject fractional values instead of silently
+// truncating them.
+func ValidateModelValue(c Catalog, model string, value map[string]any) error {
+	definition, ok := c.Model(model)
+	if !ok {
+		return fmt.Errorf("%w: model %s is not registered", domain.ErrInvalid, model)
+	}
+	for _, field := range definition.RequiredFields {
+		if blankValue(value[field]) {
+			return fmt.Errorf("%w: model %s requires %s", domain.ErrInvalid, model, field)
+		}
+	}
+	properties, _ := definition.Schema["properties"].(map[string]any)
+	for field, raw := range properties {
+		property, _ := raw.(map[string]any)
+		actual, exists := value[field]
+		if !exists || actual == nil {
+			continue
+		}
+		switch propertyType(property["type"]) {
+		case "string":
+			if kind := reflect.ValueOf(actual).Kind(); kind != reflect.String {
+				return fmt.Errorf("%w: model %s field %s must be a string", domain.ErrInvalid, model, field)
+			}
+		case "integer":
+			if !integerValue(actual) {
+				return fmt.Errorf("%w: model %s field %s must be an integer", domain.ErrInvalid, model, field)
+			}
+		case "number":
+			if _, ok := modelNumberValue(actual); !ok {
+				return fmt.Errorf("%w: model %s field %s must be a number", domain.ErrInvalid, model, field)
+			}
+		case "boolean":
+			if _, ok := actual.(bool); !ok {
+				return fmt.Errorf("%w: model %s field %s must be a boolean", domain.ErrInvalid, model, field)
+			}
+		}
+		if constant, ok := property["const"]; ok && !modelValuesEqual(actual, constant) {
+			return fmt.Errorf("%w: model %s field %s has an invalid constant", domain.ErrInvalid, model, field)
+		}
+	}
+	return nil
+}
+
+func propertyType(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func blankValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text) == ""
+	}
+	return false
+}
+
+func integerValue(value any) bool {
+	switch typed := value.(type) {
+	case int:
+		return true
+	case int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true
+	case float32:
+		return float32(math.Trunc(float64(typed))) == typed
+	case float64:
+		return !math.IsNaN(typed) && !math.IsInf(typed, 0) && math.Trunc(typed) == typed
+	case json.Number:
+		_, err := typed.Int64()
+		return err == nil
+	default:
+		return false
+	}
+}
+
+func modelNumberValue(value any) (float64, bool) {
+	switch typed := value.(type) {
+	case int:
+		return float64(typed), true
+	case int8:
+		return float64(typed), true
+	case int16:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case uint:
+		return float64(typed), true
+	case uint8:
+		return float64(typed), true
+	case uint16:
+		return float64(typed), true
+	case uint32:
+		return float64(typed), true
+	case uint64:
+		return float64(typed), true
+	case float32:
+		return float64(typed), true
+	case float64:
+		return typed, !math.IsNaN(typed) && !math.IsInf(typed, 0)
+	case json.Number:
+		parsed, err := typed.Float64()
+		return parsed, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func modelValuesEqual(left, right any) bool {
+	if leftString, ok := left.(string); ok {
+		if rightString, ok := right.(string); ok {
+			return leftString == rightString
+		}
+	}
+	return fmt.Sprint(left) == fmt.Sprint(right)
 }
 
 func (c Catalog) Validate(graph domain.FlowGraph, publish bool) ValidationResult {

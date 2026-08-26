@@ -63,6 +63,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleLogout(w, r)
 	case path == "auth/me" && r.Method == http.MethodGet:
 		s.handleMe(w, r)
+	case path == "auth/workspaces" && r.Method == http.MethodGet:
+		s.handleWorkspaces(w, r)
 	case strings.HasPrefix(path, "workspaces/"):
 		if s.integration != nil && s.handleIntegration(w, r, path) {
 			return
@@ -131,6 +133,26 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"account": account, "session": map[string]any{"id": session.ID, "expires_at": session.ExpiresAt}})
+}
+
+func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
+	session, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	reader, ok := s.accounts.(interface {
+		ListWorkspacesForAccount(context.Context, domain.ID) ([]domain.Workspace, error)
+	})
+	if !ok {
+		writeError(w, fmt.Errorf("%w: Workspace listing is not configured", domain.ErrInvalid))
+		return
+	}
+	items, err := reader.ListWorkspacesForAccount(r.Context(), session.AccountID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) handleWorkspace(w http.ResponseWriter, r *http.Request, rest string) {

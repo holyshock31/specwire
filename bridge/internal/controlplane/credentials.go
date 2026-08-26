@@ -108,6 +108,12 @@ func (s *CredentialService) RotateGroupCredential(ctx context.Context, instance 
 	if newRef.Kind != domain.SecretGroupCredential {
 		return domain.CredentialProfile{}, fmt.Errorf("%w: Group credential must use group_credential secret kind", domain.ErrInvalid)
 	}
+	// Secret aliases are unique within a Workspace.  If the operator keeps the
+	// alias, rotate the encrypted record in place; a deliberately renamed
+	// profile may receive a new reference without creating an alias collision.
+	if newRef.Alias == old.SecretRef.Alias {
+		newRef.ID = old.SecretRef.ID
+	}
 	if err := s.vault.Put(ctx, newRef, material); err != nil {
 		return domain.CredentialProfile{}, err
 	}

@@ -36,6 +36,25 @@ func (p *ProviderEndpointProbe) ProbeGitLab(ctx context.Context, instance domain
 	return []domain.CapabilityResult{{Capability: "gitlab.groups.read", Available: true}}, nil
 }
 
+// ProbeGitLabGroup verifies the capabilities that can be observed without a
+// write-side permission probe.  GitLab does not expose a portable endpoint
+// for testing webhook-write permission, so that capability remains
+// provider-side and is reported when the hook reconciliation actually runs.
+func (p *ProviderEndpointProbe) ProbeGitLabGroup(ctx context.Context, instance domain.GitLabInstance, binding domain.GitLabGroupBinding, material []byte) ([]domain.CapabilityResult, error) {
+	if len(material) == 0 {
+		return nil, fmt.Errorf("%w: Group credential material is required", domain.ErrInvalid)
+	}
+	credential := &provider.Credential{Ref: domain.SecretRef{ID: domain.ID("credential-probe"), WorkspaceID: binding.WorkspaceID, Alias: "credential-probe", Kind: domain.SecretGroupCredential}, Material: material}
+	group := provider.GitLabGroup{InstanceID: instance.ID, ExternalID: binding.ExternalGroupID, FullPath: binding.FullPath}
+	if _, err := p.gitlab.ListProjects(ctx, instance, group, "", credential); err != nil {
+		return nil, err
+	}
+	return []domain.CapabilityResult{
+		{Capability: "gitlab.groups.read", Available: true},
+		{Capability: "gitlab.projects.read", Available: true},
+	}, nil
+}
+
 func (p *ProviderEndpointProbe) ProbeMultica(ctx context.Context, instance domain.MulticaInstance) ([]domain.CapabilityResult, error) {
 	readiness, err := p.multica.ProbeReadiness(ctx, instance)
 	if err != nil {

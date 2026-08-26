@@ -15,6 +15,9 @@ type RegistryStore interface {
 	ListConnectorTypes(context.Context, domain.ID) ([]domain.ConnectorType, error)
 	ListConnectorBehaviors(context.Context, domain.ID) ([]domain.ConnectorBehavior, error)
 	ListDataModels(context.Context, domain.ID) ([]domain.DataModelDefinition, error)
+	SetConnectorTypeStatus(context.Context, domain.ID, domain.ID, domain.ConnectorStatus) error
+	SetConnectorBehaviorStatus(context.Context, domain.ID, domain.ID, domain.ConnectorStatus) error
+	SetDataModelStatus(context.Context, domain.ID, domain.ID, domain.ConnectorStatus) error
 }
 
 type RegistryService struct {
@@ -57,4 +60,16 @@ func (s *RegistryService) ListConnectorBehaviors(ctx context.Context, workspaceI
 
 func (s *RegistryService) ListDataModels(ctx context.Context, workspaceID domain.ID) ([]domain.DataModelDefinition, error) {
 	return s.store.ListDataModels(ctx, workspaceID)
+}
+
+func (s *RegistryService) SetConnectorTypeStatus(ctx context.Context, workspaceID, itemID domain.ID, status domain.ConnectorStatus) error {
+	return s.store.SetConnectorTypeStatus(ctx, workspaceID, itemID, status)
+}
+
+func (s *RegistryService) SetConnectorBehaviorStatus(ctx context.Context, workspaceID, itemID domain.ID, status domain.ConnectorStatus) error {
+	return s.store.SetConnectorBehaviorStatus(ctx, workspaceID, itemID, status)
+}
+
+func (s *RegistryService) SetDataModelStatus(ctx context.Context, workspaceID, itemID domain.ID, status domain.ConnectorStatus) error {
+	return s.store.SetDataModelStatus(ctx, workspaceID, itemID, status)
 }

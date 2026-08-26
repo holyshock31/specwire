@@ -190,7 +190,7 @@ func (e *Executor) executeNode(ctx context.Context, node domain.FlowNode, input 
 			if model == "" {
 				return nil, fmt.Errorf("%w: Parse/Normalize model is required", domain.ErrInvalid)
 			}
-			return flow.ParseNormalize(input, model, runtimeContext)
+			return flow.ParseNormalizeWithCatalog(input, model, runtimeContext, e.catalog)
 		case flow.GenericMappingTemplate:
 			model := fixedString(node.Generic.ParameterBindings, "model")
 			if model == "" {
@@ -577,41 +577,7 @@ func resolveConnectorBinding(binding domain.ParameterBinding, connection domain.
 }
 
 func validateModelValue(catalog flow.Catalog, model string, value map[string]any) error {
-	definition, ok := catalog.Model(model)
-	if !ok {
-		return fmt.Errorf("%w: model %s is not registered", domain.ErrInvalid, model)
-	}
-	for _, field := range definition.RequiredFields {
-		if isBlank(value[field]) {
-			return fmt.Errorf("%w: model %s requires %s", domain.ErrInvalid, model, field)
-		}
-	}
-	properties, _ := definition.Schema["properties"].(map[string]any)
-	for field, raw := range properties {
-		property, _ := raw.(map[string]any)
-		actual, exists := value[field]
-		if !exists || actual == nil {
-			continue
-		}
-		switch property["type"] {
-		case "string":
-			if _, ok := actual.(string); !ok && stringValue(actual) == "" {
-				return fmt.Errorf("%w: model %s field %s must be a string", domain.ErrInvalid, model, field)
-			}
-		case "integer":
-			if _, ok := actual.(int); !ok {
-				if _, ok := actual.(float64); !ok {
-					if _, ok := actual.(json.Number); !ok {
-						return fmt.Errorf("%w: model %s field %s must be an integer", domain.ErrInvalid, model, field)
-					}
-				}
-			}
-		}
-		if constant, ok := property["const"]; ok && stringValue(actual) != stringValue(constant) {
-			return fmt.Errorf("%w: model %s field %s has an invalid constant", domain.ErrInvalid, model, field)
-		}
-	}
-	return nil
+	return flow.ValidateModelValue(catalog, model, value)
 }
 
 func redactedMap(value map[string]any) map[string]any {

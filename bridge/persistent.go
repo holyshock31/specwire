@@ -105,6 +105,10 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
+	credentialService, err := controlplane.NewCredentialService(store, vault, probe)
+	if err != nil {
+		return nil, err
+	}
 	executor, err := runtimenew.NewExecutor(store, gitlab, multica, vault, catalog, runtimenew.WithGitLabCredentialResolver(credentialResolver))
 	if err != nil {
 		return nil, err
@@ -125,7 +129,7 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
-	api.SetIntegrationServices(httpapi.IntegrationServices{Store: store, Selection: selection, Connections: connections, Flows: flows, Registry: registryService})
+	api.SetIntegrationServices(httpapi.IntegrationServices{Store: store, Selection: selection, Connections: connections, Credentials: credentialService, Flows: flows, Registry: registryService})
 
 	// The old .env path is still required during this change's compatibility
 	// window.  Import it once per source project and make the persistent route

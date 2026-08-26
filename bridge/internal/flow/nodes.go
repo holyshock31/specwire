@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -29,6 +30,20 @@ type MappingRule struct {
 type MappingSpec map[string]MappingRule
 
 func ParseNormalize(providerEvent map[string]any, model string, context RuntimeContext) (map[string]any, error) {
+	return parseNormalize(providerEvent, model, context, Catalog{})
+}
+
+// ParseNormalizeWithCatalog extends the built-in parsers with the declarative
+// registry seam.  An administrator-added model is intentionally treated as a
+// shape contract: the provider adapter supplies the event object, and the
+// model validator enforces its required fields and types.  Provider-specific
+// semantic extraction remains an explicitly deployed adapter concern rather
+// than user-supplied code.
+func ParseNormalizeWithCatalog(providerEvent map[string]any, model string, context RuntimeContext, catalog Catalog) (map[string]any, error) {
+	return parseNormalize(providerEvent, model, context, catalog)
+}
+
+func parseNormalize(providerEvent map[string]any, model string, context RuntimeContext, catalog Catalog) (map[string]any, error) {
 	if providerEvent == nil {
 		return nil, fmt.Errorf("%w: provider event is required", domain.ErrInvalid)
 	}
@@ -39,10 +54,27 @@ func ParseNormalize(providerEvent map[string]any, model string, context RuntimeC
 	case "ArchiveCompletion.v1", "ArchiveCompletion@v1":
 		output = parseArchiveCompletion(providerEvent, context)
 	default:
-		return nil, fmt.Errorf("%w: Parse/Normalize has no built-in parser for model %s", domain.ErrInvalid, model)
+		definition, ok := catalog.Model(model)
+		if !ok {
+			return nil, fmt.Errorf("%w: Parse/Normalize has no built-in parser for model %s", domain.ErrInvalid, model)
+		}
+		output = cloneObject(providerEvent)
+		if definition.AllowExtensions {
+			output["extensions"] = map[string]any{"provider_event": cloneObject(providerEvent)}
+		}
 	}
 	if err := validateRequiredModel(output, model); err != nil {
 		return nil, err
+	}
+	if _, ok := catalog.Model(model); ok {
+		if err := ValidateModelValue(catalog, model, output); err != nil {
+			return nil, err
+		}
+		if definition, ok := catalog.Model(model); ok && definition.AllowExtensions {
+			if _, exists := output["extensions"]; !exists {
+				output["extensions"] = map[string]any{"provider_event": cloneObject(providerEvent)}
+			}
+		}
 	}
 	return output, nil
 }
@@ -56,10 +88,11 @@ func parsePublication(event map[string]any, context RuntimeContext) map[string]a
 	output["branch"] = firstValue(fields["branch"], event["branch"])
 	output["branch_head_sha"] = firstValue(fields["branch_head_sha"], event["branch_head_sha"])
 	output["source_project"] = firstValue(context.SourceProject, stringValue(object(event["project"])["path_with_namespace"]), stringValue(event["source_project"]))
+	output["description"] = description
 	if iid := intValue(attributes["iid"]); iid != 0 {
 		output["issue_iid"] = iid
 	}
-	if url := stringValue(object(event["project"])["web_url"]); url != "" {
+	if url := firstValue(stringValue(attributes["url"]), stringValue(attributes["web_url"]), stringValue(event["issue_url"])); url != "" {
 		output["issue_url"] = url
 	}
 	output["target_ref"] = firstValue(fields["target_ref"], context.TargetRef, "refs/heads/main")
@@ -301,6 +334,21 @@ func object(value any) map[string]any {
 		return value
 	}
 	return map[string]any{}
+}
+
+func cloneObject(value map[string]any) map[string]any {
+	if value == nil {
+		return map[string]any{}
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{}
+	}
+	var copy map[string]any
+	if err := json.Unmarshal(encoded, &copy); err != nil {
+		return map[string]any{}
+	}
+	return copy
 }
 func stringValue(value any) string {
 	if value == nil {
