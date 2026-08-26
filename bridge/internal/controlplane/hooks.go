@@ -117,6 +117,82 @@ func (r *HookReconciler) PauseInputFlow(ctx context.Context, version domain.Flow
 	return err
 }
 
+// RotateSigningToken updates the provider Hook and the durable secret
+// reference as one guarded control-plane operation.  The new secret is stored
+// before the provider call, but the Hook record keeps pointing at the old
+// secret until the provider accepts the update.  If persistence fails after a
+// successful provider update, the old secret is restored on the provider as a
+// best-effort rollback so ingress does not observe a mismatched pair.
+func (r *HookReconciler) RotateSigningToken(ctx context.Context, workspaceID, connectionID domain.ID) (domain.Hook, error) {
+	connection, err := r.store.GetConnection(ctx, workspaceID, connectionID)
+	if err != nil {
+		return domain.Hook{}, err
+	}
+	hook, err := r.store.GetHookByProject(ctx, workspaceID, connection.SourceGitLabProject.InstanceID, connection.SourceGitLabProject.ExternalID)
+	if err != nil {
+		return domain.Hook{}, err
+	}
+	if hook.SigningRef == nil {
+		return domain.Hook{}, fmt.Errorf("%w: Hook has no signing secret to rotate", domain.ErrInvalid)
+	}
+	if r.vault == nil {
+		return domain.Hook{}, fmt.Errorf("%w: Hook secret store is not configured", domain.ErrInvalid)
+	}
+	oldRef := *hook.SigningRef
+	oldToken, err := r.vault.Resolve(ctx, oldRef)
+	if err != nil {
+		return domain.Hook{}, err
+	}
+	defer clearBytes(oldToken)
+	gitlabInstance, err := r.store.GetGitLabInstance(ctx, workspaceID, connection.SourceGitLabProject.InstanceID)
+	if err != nil {
+		return domain.Hook{}, err
+	}
+	gitlabCredential, cleanup, err := r.resolveGitLabCredential(ctx, connection)
+	if err != nil {
+		return domain.Hook{}, err
+	}
+	defer cleanup()
+	newToken, err := newSigningToken()
+	if err != nil {
+		return domain.Hook{}, err
+	}
+	defer clearBytes(newToken)
+	newRef := domain.SecretRef{ID: domain.NewID(), WorkspaceID: workspaceID, Alias: oldRef.Alias + "/rotation-" + domain.NewID().String(), Kind: domain.SecretHookSigning}
+	if err := r.vault.Put(ctx, newRef, newToken); err != nil {
+		return domain.Hook{}, err
+	}
+	project := connection.SourceGitLabProject
+	providerProject := provider.GitLabProject{InstanceID: project.InstanceID, ExternalID: project.ExternalID, FullPath: project.FullPath, Name: project.Name, WebURL: project.WebURL, SSHURL: project.SSHURL, HTTPSURL: project.HTTPSURL}
+	spec := provider.HookSpec{URL: r.hookURLForInstance(project.InstanceID), Events: []string{"Issue Hook", "Push Hook"}, SigningRef: newRef, SigningToken: newToken, ManagementMark: "specwire-managed"}
+	result, err := r.gitlab.EnsureHook(ctx, gitlabInstance, providerProject, spec, gitlabCredential)
+	if err != nil {
+		recordAudit(ctx, r.store, domain.AuditEvent{ID: domain.NewID(), WorkspaceID: workspaceID, ActorAccountID: "", Action: "provider.gitlab.hook.rotate", EntityType: "connection", EntityID: connection.ID, Payload: map[string]any{"workspace_id": workspaceID, "provider": "gitlab", "operation": "rotate_hook", "outcome": "failed", "error": safeMessage(err)}})
+		return domain.Hook{}, err
+	}
+	if strings.TrimSpace(result.ExternalID) == "" {
+		return domain.Hook{}, fmt.Errorf("%w: GitLab Hook adapter returned no external ID", domain.ErrInvalid)
+	}
+	rotated := hook
+	rotated.ExternalID = result.ExternalID
+	rotated.SigningRef = &newRef
+	rotated.Status = domain.HookActive
+	stored, err := r.store.UpsertHook(ctx, rotated)
+	if err != nil {
+		rollbackSpec := provider.HookSpec{URL: r.hookURLForInstance(project.InstanceID), Events: []string{"Issue Hook", "Push Hook"}, SigningRef: oldRef, SigningToken: oldToken, ManagementMark: "specwire-managed"}
+		rollbackErr := error(nil)
+		if _, rollbackErr = r.gitlab.EnsureHook(ctx, gitlabInstance, providerProject, rollbackSpec, gitlabCredential); rollbackErr != nil {
+			recordAudit(ctx, r.store, domain.AuditEvent{ID: domain.NewID(), WorkspaceID: workspaceID, Action: "provider.gitlab.hook.rotate.rollback", EntityType: "connection", EntityID: connection.ID, Payload: map[string]any{"workspace_id": workspaceID, "provider": "gitlab", "operation": "rollback_hook_rotation", "outcome": "failed", "error": safeMessage(rollbackErr)}})
+		}
+		if rollbackErr != nil {
+			return domain.Hook{}, fmt.Errorf("%w: persist rotated Hook (rollback failed: %v)", err, rollbackErr)
+		}
+		return domain.Hook{}, fmt.Errorf("%w: persist rotated Hook; provider update rolled back", err)
+	}
+	recordAudit(ctx, r.store, domain.AuditEvent{ID: domain.NewID(), WorkspaceID: workspaceID, Action: "provider.gitlab.hook.rotate", EntityType: "connection", EntityID: connection.ID, Payload: map[string]any{"workspace_id": workspaceID, "provider": "gitlab", "operation": "rotate_hook", "outcome": "succeeded", "external_id": result.ExternalID, "request_id": result.RequestID}})
+	return stored, nil
+}
+
 func (r *HookReconciler) inputNode(ctx context.Context, workspaceID domain.ID, graph domain.FlowGraph) (domain.FlowNode, domain.ConnectorBehavior, error) {
 	catalog := r.behaviors
 	if r.catalog != nil {

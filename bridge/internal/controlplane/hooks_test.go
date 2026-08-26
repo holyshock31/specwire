@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"testing"
 
 	"specwire/bridge/internal/domain"
@@ -14,8 +15,9 @@ import (
 )
 
 type hookGitLabFake struct {
-	ensureCalls int
-	lastSpec    provider.HookSpec
+	ensureCalls  int
+	lastSpec     provider.HookSpec
+	ensureErrors []error
 }
 
 func (f *hookGitLabFake) ListGroups(context.Context, domain.GitLabInstance, string, *provider.Credential) ([]provider.GitLabGroup, error) {
@@ -32,6 +34,11 @@ func (f *hookGitLabFake) EnsureLabel(context.Context, domain.GitLabInstance, pro
 }
 func (f *hookGitLabFake) EnsureHook(_ context.Context, _ domain.GitLabInstance, _ provider.GitLabProject, spec provider.HookSpec, _ *provider.Credential) (provider.HookResult, error) {
 	f.ensureCalls++
+	if len(f.ensureErrors) > 0 {
+		err := f.ensureErrors[0]
+		f.ensureErrors = f.ensureErrors[1:]
+		return provider.HookResult{}, err
+	}
 	f.lastSpec = spec
 	return provider.HookResult{ExternalID: "hook-42", Adopted: f.ensureCalls > 1}, nil
 }
@@ -112,6 +119,30 @@ func TestHookReconcilerSharesHookAcrossPublishedInputFlows(t *testing.T) {
 	}
 	if hook.ExternalID != "hook-42" || hook.SigningRef == nil || hook.SigningRef.Alias == "" {
 		t.Fatalf("stored Hook = %+v", hook)
+	}
+	oldSigningRef := *hook.SigningRef
+	rotated, err := reconciler.RotateSigningToken(ctx, workspaceID, "connection-hooks")
+	if err != nil {
+		t.Fatalf("rotate Hook signing token: %v", err)
+	}
+	if rotated.SigningRef == nil || rotated.SigningRef.ID == oldSigningRef.ID {
+		t.Fatalf("rotated Hook signing ref = %+v, old = %+v", rotated.SigningRef, oldSigningRef)
+	}
+	rotatedSecret, err := vault.Resolve(ctx, *rotated.SigningRef)
+	if err != nil || len(rotatedSecret) == 0 {
+		t.Fatalf("rotated Hook secret = %q, %v", rotatedSecret, err)
+	}
+	clearBytes(rotatedSecret)
+	gitlab.ensureErrors = []error{errors.New("GitLab temporarily unavailable")}
+	if _, err := reconciler.RotateSigningToken(ctx, workspaceID, "connection-hooks"); err == nil {
+		t.Fatal("provider rotation failure must be returned")
+	}
+	afterFailedRotation, err := s.GetHookByProject(ctx, workspaceID, gitlabInstance.ID, "source-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterFailedRotation.SigningRef == nil || afterFailedRotation.SigningRef.ID != rotated.SigningRef.ID {
+		t.Fatalf("failed rotation changed durable signing ref: %+v", afterFailedRotation.SigningRef)
 	}
 	secret, err := vault.Resolve(ctx, *hook.SigningRef)
 	if err != nil || len(secret) == 0 {

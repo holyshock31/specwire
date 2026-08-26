@@ -56,6 +56,7 @@ type IntegrationServices struct {
 	Store       IntegrationStore
 	Selection   *controlplane.SelectionService
 	Connections *controlplane.ConnectionService
+	Hooks       *controlplane.HookReconciler
 	Credentials *controlplane.CredentialService
 	Flows       *flow.Service
 	Registry    *controlplane.RegistryService
@@ -564,6 +565,22 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request, sessi
 		}
 		writeJSON(w, http.StatusOK, items)
 	case "hooks":
+		if len(parts) == 5 && parts[4] == "rotate" {
+			if r.Method != http.MethodPost || s.integration.Hooks == nil || !s.checkCSRF(w, r, session) {
+				if r.Method != http.MethodPost {
+					http.NotFound(w, r)
+				}
+				return
+			}
+			rotated, err := s.integration.Hooks.RotateSigningToken(r.Context(), workspaceID, connection.ID)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			s.audit(r.Context(), session.AccountID, "hook.rotate", "hook", rotated.ID, map[string]any{"workspace_id": workspaceID, "connection_id": connection.ID})
+			writeJSON(w, http.StatusOK, rotated)
+			return
+		}
 		if r.Method != http.MethodGet {
 			http.NotFound(w, r)
 			return

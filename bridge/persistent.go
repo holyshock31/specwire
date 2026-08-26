@@ -142,7 +142,7 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
-	api.SetIntegrationServices(httpapi.IntegrationServices{Store: store, Selection: selection, Connections: connections, Credentials: credentialService, Flows: flows, Registry: registryService, LiveTests: liveTests})
+	api.SetIntegrationServices(httpapi.IntegrationServices{Store: store, Selection: selection, Connections: connections, Hooks: hooks, Credentials: credentialService, Flows: flows, Registry: registryService, LiveTests: liveTests})
 
 	// The old .env path is still required during this change's compatibility
 	// window.  Import it once per source project and make the persistent route
