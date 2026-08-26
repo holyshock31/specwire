@@ -69,8 +69,8 @@ func TestMigrationsAreVersionedAndIdempotent(t *testing.T) {
 	if err := first.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil {
 		t.Fatalf("schema_migrations: %v", err)
 	}
-	if migrations != 12 {
-		t.Fatalf("migrations = %d, want 12", migrations)
+	if migrations != 13 {
+		t.Fatalf("migrations = %d, want 13", migrations)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -83,8 +83,8 @@ func TestMigrationsAreVersionedAndIdempotent(t *testing.T) {
 	if err := second.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil {
 		t.Fatal(err)
 	}
-	if migrations != 12 {
-		t.Fatalf("migrations after reopen = %d, want 12", migrations)
+	if migrations != 13 {
+		t.Fatalf("migrations after reopen = %d, want 13", migrations)
 	}
 	var legacyConnectorTables int
 	if err := second.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'connector_instances'`).Scan(&legacyConnectorTables); err != nil {
@@ -92,6 +92,36 @@ func TestMigrationsAreVersionedAndIdempotent(t *testing.T) {
 	}
 	if legacyConnectorTables != 0 {
 		t.Fatal("Flow-level connector_instances table must not be part of the new schema")
+	}
+}
+
+func TestMulticaProjectURLSnapshotRoundTrips(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	workspace := testWorkspace(t, s, "workspace-multica-url")
+	testEndpoints(t, s, workspace.ID, "gitlab-multica-url", "multica-url", "url")
+	multicaWorkspace, err := s.UpsertMulticaWorkspace(ctx, domain.MulticaWorkspaceRef{
+		ID: "multica-workspace-url", WorkspaceID: workspace.ID, InstanceID: "multica-url", ExternalID: "team-core", Name: "Team Core",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := s.UpsertMulticaProject(ctx, domain.MulticaProjectRef{
+		ID: "multica-project-url", WorkspaceID: workspace.ID, InstanceID: "multica-url", MulticaWorkspaceID: multicaWorkspace.ID,
+		ExternalID: "project-webdeck", Title: "platform/webdeck", WebURL: "https://multica.example/projects/project-webdeck",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.WebURL != "https://multica.example/projects/project-webdeck" {
+		t.Fatalf("upserted project URL = %q", project.WebURL)
+	}
+	listed, err := s.ListMulticaProjects(ctx, workspace.ID, "multica-url", multicaWorkspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].WebURL != project.WebURL {
+		t.Fatalf("listed project snapshot = %+v", listed)
 	}
 }
 

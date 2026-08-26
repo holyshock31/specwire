@@ -79,7 +79,7 @@ func (s *SelectionService) MulticaProjects(ctx context.Context, instance domain.
 	}
 	result := make([]domain.MulticaProjectRef, 0, len(items))
 	for _, item := range items {
-		stored, err := s.store.UpsertMulticaProject(ctx, domain.MulticaProjectRef{WorkspaceID: instance.WorkspaceID, InstanceID: instance.ID, MulticaWorkspaceID: workspace.ID, ExternalID: item.ExternalID, Title: item.Title})
+		stored, err := s.store.UpsertMulticaProject(ctx, domain.MulticaProjectRef{WorkspaceID: instance.WorkspaceID, InstanceID: instance.ID, MulticaWorkspaceID: workspace.ID, ExternalID: item.ExternalID, Title: item.Title, WebURL: item.WebURL})
 		if err != nil {
 			return nil, err
 		}

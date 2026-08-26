@@ -73,11 +73,11 @@ func (s *Store) UpsertMulticaProject(ctx context.Context, project domain.Multica
 		project.ID = domain.NewID()
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO multica_projects
-		(id, workspace_id, multica_instance_id, multica_workspace_id, external_id, title)
-		VALUES (?, ?, ?, ?, ?, ?)
+		(id, workspace_id, multica_instance_id, multica_workspace_id, external_id, title, web_url)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(workspace_id, multica_instance_id, external_id) DO UPDATE SET
-		multica_workspace_id = excluded.multica_workspace_id, title = excluded.title`,
-		project.ID, project.WorkspaceID, project.InstanceID, project.MulticaWorkspaceID, project.ExternalID, project.Title)
+		multica_workspace_id = excluded.multica_workspace_id, title = excluded.title, web_url = excluded.web_url`,
+		project.ID, project.WorkspaceID, project.InstanceID, project.MulticaWorkspaceID, project.ExternalID, project.Title, project.WebURL)
 	if err != nil {
 		return domain.MulticaProjectRef{}, constraintError("upsert Multica project", err)
 	}
@@ -86,9 +86,9 @@ func (s *Store) UpsertMulticaProject(ctx context.Context, project domain.Multica
 
 func (s *Store) GetMulticaProject(ctx context.Context, workspaceID, instanceID domain.ID, externalID string) (domain.MulticaProjectRef, error) {
 	var item domain.MulticaProjectRef
-	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, multica_instance_id, multica_workspace_id, external_id, title
+	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, multica_instance_id, multica_workspace_id, external_id, title, web_url
 		FROM multica_projects WHERE workspace_id = ? AND multica_instance_id = ? AND external_id = ?`, workspaceID, instanceID, externalID).
-		Scan(&item.ID, &item.WorkspaceID, &item.InstanceID, &item.MulticaWorkspaceID, &item.ExternalID, &item.Title)
+		Scan(&item.ID, &item.WorkspaceID, &item.InstanceID, &item.MulticaWorkspaceID, &item.ExternalID, &item.Title, &item.WebURL)
 	if err == sql.ErrNoRows {
 		return domain.MulticaProjectRef{}, fmt.Errorf("%w: Multica project %s", domain.ErrNotFound, externalID)
 	}
@@ -102,7 +102,7 @@ func (s *Store) ListMulticaProjects(ctx context.Context, workspaceID, instanceID
 	if err := requireWorkspaceID(workspaceID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, multica_instance_id, multica_workspace_id, external_id, title
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, multica_instance_id, multica_workspace_id, external_id, title, web_url
 		FROM multica_projects WHERE workspace_id = ? AND multica_instance_id = ? AND multica_workspace_id = ? ORDER BY title, external_id`, workspaceID, instanceID, multicaWorkspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list Multica projects: %w", err)
@@ -111,7 +111,7 @@ func (s *Store) ListMulticaProjects(ctx context.Context, workspaceID, instanceID
 	var result []domain.MulticaProjectRef
 	for rows.Next() {
 		var item domain.MulticaProjectRef
-		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.InstanceID, &item.MulticaWorkspaceID, &item.ExternalID, &item.Title); err != nil {
+		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.InstanceID, &item.MulticaWorkspaceID, &item.ExternalID, &item.Title, &item.WebURL); err != nil {
 			return nil, err
 		}
 		result = append(result, item)

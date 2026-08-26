@@ -332,6 +332,7 @@ type MulticaProjectRef struct {
 	MulticaWorkspaceID ID     `json:"multica_workspace_id"`
 	ExternalID         string `json:"external_id"`
 	Title              string `json:"title"`
+	WebURL             string `json:"web_url,omitempty"`
 }
 
 type Connection struct {

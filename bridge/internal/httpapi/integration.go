@@ -684,7 +684,7 @@ func (s *Server) onboard(ctx context.Context, session domain.Session, workspaceI
 		if err != nil {
 			return controlplane.OnboardingResult{}, err
 		}
-		targetProject = &provider.MulticaProject{InstanceID: targetInstance.ID, ExternalID: project.ExternalID, Title: project.Title, WorkspaceID: workspaceRef.ExternalID}
+		targetProject = &provider.MulticaProject{InstanceID: targetInstance.ID, ExternalID: project.ExternalID, Title: project.Title, WebURL: project.WebURL, WorkspaceID: workspaceRef.ExternalID}
 	}
 	result, err := s.integration.Connections.Onboard(ctx, controlplane.OnboardingRequest{
 		OperationID: request.OperationID, ActorID: session.AccountID, WorkspaceID: workspaceID, SourceGitLabInstance: sourceInstance, SourceProjectExternalID: request.SourceProjectExternalID,
