@@ -88,9 +88,9 @@ func (s *Store) CreateGitLabGroupBinding(ctx context.Context, binding domain.Git
 		return fmt.Errorf("%w: GitLab group binding instance, external_group_id and full_path are required", domain.ErrInvalid)
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO gitlab_group_bindings
-		(id, workspace_id, gitlab_instance_id, external_group_id, full_path, credential_ref_id, inherit_subgroups, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, binding.ID, binding.WorkspaceID, binding.GitLabInstanceID,
-		binding.ExternalGroupID, binding.FullPath, secretRefID(binding.CredentialRef), boolInt(binding.InheritSubgroups), binding.Status)
+		(id, workspace_id, gitlab_instance_id, external_group_id, full_path, credential_ref_id, credential_profile_id, inherit_subgroups, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, binding.ID, binding.WorkspaceID, binding.GitLabInstanceID,
+		binding.ExternalGroupID, binding.FullPath, secretRefID(binding.CredentialRef), nullID(binding.CredentialProfileID), boolInt(binding.InheritSubgroups), binding.Status)
 	return constraintError("create GitLab group binding", err)
 }
 
@@ -148,3 +148,178 @@ func (s *Store) GetGitLabInstance(ctx context.Context, workspaceID, instanceID d
 }
 
 func isNoRows(err error) bool { return err == sql.ErrNoRows }
+
+func (s *Store) ListGitLabInstances(ctx context.Context, workspaceID domain.ID) ([]domain.GitLabInstance, error) {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, base_url, external_id, credential_ref_id, status, capabilities_json
+		FROM gitlab_instances WHERE workspace_id = ? ORDER BY name, id`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list GitLab instances: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.GitLabInstance
+	for rows.Next() {
+		var item domain.GitLabInstance
+		var external, credential sql.NullString
+		var capabilities string
+		if err := rows.Scan(&item.ID, &item.Name, &item.BaseURL, &external, &credential, &item.Status, &capabilities); err != nil {
+			return nil, err
+		}
+		item.WorkspaceID = workspaceID
+		if external.Valid {
+			item.ExternalID = external.String
+		}
+		if credential.Valid && credential.String != "" {
+			item.CredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+		}
+		if err := json.Unmarshal([]byte(capabilities), &item.Capabilities); err != nil {
+			return nil, fmt.Errorf("decode GitLab capabilities: %w", err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListMulticaInstances(ctx context.Context, workspaceID domain.ID) ([]domain.MulticaInstance, error) {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, base_url, external_id, management_credential_ref_id, status, capabilities_json
+		FROM multica_instances WHERE workspace_id = ? ORDER BY name, id`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list Multica instances: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.MulticaInstance
+	for rows.Next() {
+		var item domain.MulticaInstance
+		var external, credential sql.NullString
+		var capabilities string
+		if err := rows.Scan(&item.ID, &item.Name, &item.BaseURL, &external, &credential, &item.Status, &capabilities); err != nil {
+			return nil, err
+		}
+		item.WorkspaceID = workspaceID
+		if external.Valid {
+			item.ExternalID = external.String
+		}
+		if credential.Valid && credential.String != "" {
+			item.ManagementCredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+		}
+		if err := json.Unmarshal([]byte(capabilities), &item.Capabilities); err != nil {
+			return nil, fmt.Errorf("decode Multica capabilities: %w", err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DisableGitLabInstance(ctx context.Context, workspaceID, instanceID domain.ID) error {
+	return s.disableEndpoint(ctx, "gitlab_instances", workspaceID, instanceID)
+}
+
+func (s *Store) DisableMulticaInstance(ctx context.Context, workspaceID, instanceID domain.ID) error {
+	return s.disableEndpoint(ctx, "multica_instances", workspaceID, instanceID)
+}
+
+func (s *Store) UpdateGitLabCapabilities(ctx context.Context, workspaceID, instanceID domain.ID, capabilities []string) error {
+	return s.updateEndpointCapabilities(ctx, "gitlab_instances", workspaceID, instanceID, capabilities)
+}
+
+func (s *Store) UpdateMulticaCapabilities(ctx context.Context, workspaceID, instanceID domain.ID, capabilities []string) error {
+	return s.updateEndpointCapabilities(ctx, "multica_instances", workspaceID, instanceID, capabilities)
+}
+
+func (s *Store) updateEndpointCapabilities(ctx context.Context, table string, workspaceID, instanceID domain.ID, capabilities []string) error {
+	if table != "gitlab_instances" && table != "multica_instances" {
+		return fmt.Errorf("%w: unsupported endpoint table", domain.ErrInvalid)
+	}
+	encoded, err := marshalJSON(capabilities, "[]")
+	if err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE `+table+` SET capabilities_json = ? WHERE workspace_id = ? AND id = ?`, encoded, workspaceID, instanceID)
+	if err != nil {
+		return fmt.Errorf("update endpoint capabilities: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: endpoint %s", domain.ErrNotFound, instanceID)
+	}
+	return nil
+}
+
+func (s *Store) disableEndpoint(ctx context.Context, table string, workspaceID, instanceID domain.ID) error {
+	if table != "gitlab_instances" && table != "multica_instances" {
+		return fmt.Errorf("%w: unsupported endpoint table", domain.ErrInvalid)
+	}
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE `+table+` SET status = 'disabled' WHERE workspace_id = ? AND id = ?`, workspaceID, instanceID)
+	if err != nil {
+		return fmt.Errorf("disable endpoint: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: endpoint %s", domain.ErrNotFound, instanceID)
+	}
+	return nil
+}
+
+func (s *Store) GetGitLabGroupBinding(ctx context.Context, workspaceID, bindingID domain.ID) (domain.GitLabGroupBinding, error) {
+	var binding domain.GitLabGroupBinding
+	var credential, profile sql.NullString
+	var inherit int
+	err := s.db.QueryRowContext(ctx, `SELECT id, gitlab_instance_id, external_group_id, full_path,
+		credential_ref_id, credential_profile_id, inherit_subgroups, status FROM gitlab_group_bindings
+		WHERE workspace_id = ? AND id = ?`, workspaceID, bindingID).Scan(&binding.ID, &binding.GitLabInstanceID,
+		&binding.ExternalGroupID, &binding.FullPath, &credential, &profile, &inherit, &binding.Status)
+	if err == sql.ErrNoRows {
+		return domain.GitLabGroupBinding{}, fmt.Errorf("%w: GitLab group binding %s", domain.ErrNotFound, bindingID)
+	}
+	if err != nil {
+		return domain.GitLabGroupBinding{}, fmt.Errorf("get GitLab group binding: %w", err)
+	}
+	binding.WorkspaceID = workspaceID
+	binding.InheritSubgroups = inherit != 0
+	if profile.Valid {
+		binding.CredentialProfileID = domain.ID(profile.String)
+	}
+	if credential.Valid && credential.String != "" {
+		binding.CredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+	}
+	return binding, nil
+}
+
+func (s *Store) UpdateGitLabGroupCredential(ctx context.Context, workspaceID, bindingID, profileID domain.ID, ref *domain.SecretRef) error {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	if profileID.Empty() || ref == nil {
+		return fmt.Errorf("%w: credential profile and secret reference are required", domain.ErrInvalid)
+	}
+	if ref.WorkspaceID != workspaceID {
+		return fmt.Errorf("%w: credential belongs to another workspace", domain.ErrForbidden)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE gitlab_group_bindings SET credential_ref_id = ?, credential_profile_id = ?
+		WHERE workspace_id = ? AND id = ?`, ref.ID, profileID, workspaceID, bindingID)
+	if err != nil {
+		return constraintError("update GitLab group credential", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: GitLab group binding %s", domain.ErrNotFound, bindingID)
+	}
+	return nil
+}

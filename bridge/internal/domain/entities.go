@@ -137,6 +137,39 @@ const (
 	SecretGeneric           SecretKind = "generic"
 )
 
+type CredentialProfileKind string
+
+const (
+	CredentialPAT              CredentialProfileKind = "pat"
+	CredentialGroupAccessToken CredentialProfileKind = "group_access_token"
+)
+
+type CredentialStatus string
+
+const (
+	CredentialActive   CredentialStatus = "active"
+	CredentialDisabled CredentialStatus = "disabled"
+	CredentialInvalid  CredentialStatus = "invalid"
+)
+
+type CredentialProfile struct {
+	ID           ID                    `json:"id"`
+	WorkspaceID  ID                    `json:"workspace_id"`
+	Provider     ProviderKind          `json:"provider"`
+	Kind         CredentialProfileKind `json:"kind"`
+	Alias        string                `json:"alias"`
+	SecretRef    SecretRef             `json:"secret_ref"`
+	Status       CredentialStatus      `json:"status"`
+	Capabilities []string              `json:"capabilities,omitempty"`
+}
+
+type CapabilityResult struct {
+	Capability string `json:"capability"`
+	Available  bool   `json:"available"`
+	Reason     string `json:"reason,omitempty"`
+	RequestID  string `json:"request_id,omitempty"`
+}
+
 // Workspace is the isolation boundary for all control-plane resources.
 type Workspace struct {
 	ID        ID              `json:"id"`
@@ -214,14 +247,15 @@ type GitLabInstance struct {
 }
 
 type GitLabGroupBinding struct {
-	ID               ID             `json:"id"`
-	WorkspaceID      ID             `json:"workspace_id"`
-	GitLabInstanceID ID             `json:"gitlab_instance_id"`
-	ExternalGroupID  string         `json:"external_group_id"`
-	FullPath         string         `json:"full_path"`
-	CredentialRef    *SecretRef     `json:"credential_ref,omitempty"`
-	InheritSubgroups bool           `json:"inherit_subgroups"`
-	Status           EndpointStatus `json:"status"`
+	ID                  ID             `json:"id"`
+	WorkspaceID         ID             `json:"workspace_id"`
+	GitLabInstanceID    ID             `json:"gitlab_instance_id"`
+	ExternalGroupID     string         `json:"external_group_id"`
+	FullPath            string         `json:"full_path"`
+	CredentialProfileID ID             `json:"credential_profile_id,omitempty"`
+	CredentialRef       *SecretRef     `json:"credential_ref,omitempty"`
+	InheritSubgroups    bool           `json:"inherit_subgroups"`
+	Status              EndpointStatus `json:"status"`
 }
 
 type MulticaInstance struct {
