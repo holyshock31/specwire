@@ -21,14 +21,14 @@
 
 ## 3. Connection onboarding and shared provider resources
 
-- [ ] 3.1 Implement server-backed searchable selectors for GitLab endpoint → Group → project and Multica endpoint → workspace → project, returning stable internal and external IDs plus URL/clone snapshots and the selected provider capability state.
-- [ ] 3.2 Implement Connection creation with one source GitLab project and one target Multica project, existing-project selection or defaulted project creation using the GitLab full path title and unset optional fields, one-to-one conflict detection, and explicit dry-run output.
-- [ ] 3.3 Implement idempotent Multica project creation and add/adopt of the runtime clone URL in both the selected Multica workspace repository registry and project resources, using the `specwire-managed` marker for created resources and recording managed/adopted ownership separately.
-- [ ] 3.4 Implement capability probing and canonical clone-URL selection (instance host alias, SSH default, HTTPS fallback) without confusing optional Multica management access or runtime `glab` access with login credentials.
-- [ ] 3.5 Implement durable Connection onboarding checkpoints, `configured` versus `ready` status, retryable/blocked/conflict errors, partial-progress resume, and audit events for every provider side effect.
-- [ ] 3.6 Implement shared GitLab Hook reconciliation for compatible input behaviors: one managed Hook per source project, safe signing-token rotation, preservation of unrelated Hooks, and route registration only when an input Flow is published.
-- [ ] 3.7 Implement Connection disable/unbind and explicit managed-resource deprovision checks without deleting external projects, adopted resources, unrelated Hooks, or historical executions.
-- [ ] 3.8 Add provider-fake and integration tests for duplicate suppression, existing-resource adoption, project title conflicts, one-to-one mapping conflicts, Hook sharing, Hook rotation, and retry after partial onboarding failure.
+- [x] 3.1 Implement server-backed searchable selectors for GitLab endpoint → Group → project and Multica endpoint → workspace → project, returning stable internal and external IDs plus URL/clone snapshots and the selected provider capability state.
+- [x] 3.2 Implement Connection creation with one source GitLab project and one target Multica project, existing-project selection or defaulted project creation using the GitLab full path title and unset optional fields, one-to-one conflict detection, and explicit dry-run output.
+- [x] 3.3 Implement idempotent Multica project creation and add/adopt of the runtime clone URL in both the selected Multica workspace repository registry and project resources, using the `specwire-managed` marker for created resources and recording managed/adopted ownership separately.
+- [x] 3.4 Implement capability probing and canonical clone-URL selection (instance host alias, SSH default, HTTPS fallback) without confusing optional Multica management access or runtime `glab` access with login credentials.
+- [x] 3.5 Implement durable Connection onboarding checkpoints, `configured` versus `ready` status, retryable/blocked/conflict errors, partial-progress resume, and audit events for every provider side effect.
+- [x] 3.6 Implement shared GitLab Hook reconciliation for compatible input behaviors: one managed Hook per source project, safe signing-token rotation, preservation of unrelated Hooks, and route registration only when an input Flow is published.
+- [x] 3.7 Implement Connection disable/unbind and explicit managed-resource deprovision checks without deleting external projects, adopted resources, unrelated Hooks, or historical executions.
+- [x] 3.8 Add provider-fake and integration tests for duplicate suppression, existing-resource adoption, project title conflicts, one-to-one mapping conflicts, Hook sharing, Hook rotation, and retry after partial onboarding failure.
 
 ## 4. Connector behavior and DataModel registry
 
