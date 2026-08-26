@@ -155,6 +155,33 @@ func (s *Store) GetGitLabInstance(ctx context.Context, workspaceID, instanceID d
 	return instance, nil
 }
 
+func (s *Store) GetMulticaInstance(ctx context.Context, workspaceID, instanceID domain.ID) (domain.MulticaInstance, error) {
+	var instance domain.MulticaInstance
+	var external, credential sql.NullString
+	var capabilities string
+	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, name, base_url,
+		external_id, management_credential_ref_id, status, capabilities_json FROM multica_instances
+		WHERE workspace_id = ? AND id = ?`, workspaceID, instanceID).Scan(
+		&instance.ID, &instance.WorkspaceID, &instance.Name, &instance.BaseURL,
+		&external, &credential, &instance.Status, &capabilities)
+	if err == sql.ErrNoRows {
+		return domain.MulticaInstance{}, fmt.Errorf("%w: Multica instance %s", domain.ErrNotFound, instanceID)
+	}
+	if err != nil {
+		return domain.MulticaInstance{}, fmt.Errorf("get Multica instance: %w", err)
+	}
+	if external.Valid {
+		instance.ExternalID = external.String
+	}
+	if credential.Valid && credential.String != "" {
+		instance.ManagementCredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+	}
+	if err := json.Unmarshal([]byte(capabilities), &instance.Capabilities); err != nil {
+		return domain.MulticaInstance{}, fmt.Errorf("decode Multica capabilities: %w", err)
+	}
+	return instance, nil
+}
+
 func isNoRows(err error) bool { return err == sql.ErrNoRows }
 
 func (s *Store) ListGitLabInstances(ctx context.Context, workspaceID domain.ID) ([]domain.GitLabInstance, error) {

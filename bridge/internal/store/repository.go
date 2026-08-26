@@ -137,13 +137,13 @@ func (s *Store) CreateConnection(ctx context.Context, connection domain.Connecti
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO connections (
 		id, workspace_id, name,
-		source_gitlab_instance_id, source_project_external_id, source_project_path,
+		source_gitlab_instance_id, source_group_external_id, source_project_external_id, source_project_path,
 		source_project_web_url, source_project_ssh_url, source_project_https_url,
 		target_multica_instance_id, target_project_external_id, target_project_name,
 		target_project_web_url, status, configured_at, ready_at, disabled_at, created_by
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		connection.ID, connection.WorkspaceID, connection.Name,
-		connection.SourceGitLabProject.InstanceID, connection.SourceGitLabProject.ExternalID,
+		connection.SourceGitLabProject.InstanceID, connection.SourceGitLabProject.GroupID, connection.SourceGitLabProject.ExternalID,
 		connection.SourceGitLabProject.FullPath, connection.SourceGitLabProject.WebURL,
 		connection.SourceGitLabProject.SSHURL, connection.SourceGitLabProject.HTTPSURL,
 		connection.TargetMulticaProject.InstanceID, connection.TargetMulticaProject.ExternalID,
@@ -174,13 +174,13 @@ func (s *Store) GetConnection(ctx context.Context, workspaceID, connectionID dom
 	var createdBy sql.NullString
 	err := s.db.QueryRowContext(ctx, `SELECT
 		id, workspace_id, name,
-		source_gitlab_instance_id, source_project_external_id, source_project_path,
+		source_gitlab_instance_id, source_group_external_id, source_project_external_id, source_project_path,
 		source_project_web_url, source_project_ssh_url, source_project_https_url,
 		target_multica_instance_id, target_project_external_id, target_project_name,
 		target_project_web_url, status, configured_at, ready_at, disabled_at, created_by
 		FROM connections WHERE workspace_id = ? AND id = ?`, workspaceID, connectionID).Scan(
 		&c.ID, &c.WorkspaceID, &c.Name,
-		&c.SourceGitLabProject.InstanceID, &c.SourceGitLabProject.ExternalID,
+		&c.SourceGitLabProject.InstanceID, &c.SourceGitLabProject.GroupID, &c.SourceGitLabProject.ExternalID,
 		&c.SourceGitLabProject.FullPath, &c.SourceGitLabProject.WebURL,
 		&c.SourceGitLabProject.SSHURL, &c.SourceGitLabProject.HTTPSURL,
 		&c.TargetMulticaProject.InstanceID, &c.TargetMulticaProject.ExternalID,

@@ -15,6 +15,128 @@ import (
 
 const ErrNoJobText = "no runnable job"
 
+// AcceptInboundEvent durably accepts one provider delivery and its Flow
+// execution in one transaction.  The uniqueness of the inbound delivery and
+// execution idempotency key is deliberately enforced by SQLite, so concurrent
+// webhook requests converge on the same execution without a provider call.
+func (s *Store) AcceptInboundEvent(ctx context.Context, event domain.InboundEvent, execution domain.FlowExecution, job domain.Job) (domain.FlowExecution, bool, error) {
+	if event.ID.Empty() {
+		event.ID = domain.NewID()
+	}
+	if execution.ID.Empty() {
+		execution.ID = domain.NewID()
+	}
+	if job.ID.Empty() {
+		job.ID = domain.NewID()
+	}
+	if err := requireWorkspaceID(event.WorkspaceID); err != nil {
+		return domain.FlowExecution{}, false, err
+	}
+	if event.WorkspaceID != execution.WorkspaceID || event.ConnectionID != execution.ConnectionID {
+		return domain.FlowExecution{}, false, fmt.Errorf("%w: inbound event and execution scope mismatch", domain.ErrInvalid)
+	}
+	if execution.EventID.Empty() {
+		execution.EventID = event.ID
+	}
+	if execution.EventID != event.ID {
+		return domain.FlowExecution{}, false, fmt.Errorf("%w: execution event mismatch", domain.ErrInvalid)
+	}
+	if execution.Status == "" {
+		execution.Status = domain.ExecutionQueued
+	}
+	if job.WorkspaceID.Empty() {
+		job.WorkspaceID = event.WorkspaceID
+	}
+	if job.WorkspaceID != event.WorkspaceID {
+		return domain.FlowExecution{}, false, fmt.Errorf("%w: job workspace mismatch", domain.ErrInvalid)
+	}
+	if strings.TrimSpace(job.Kind) == "" {
+		job.Kind = "flow.execute"
+	}
+	now := s.now().UTC()
+	if event.ReceivedAt.IsZero() {
+		event.ReceivedAt = now
+	}
+	if execution.CreatedAt.IsZero() {
+		execution.CreatedAt = now
+	}
+	if execution.UpdatedAt.IsZero() {
+		execution.UpdatedAt = execution.CreatedAt
+	}
+	if job.AvailableAt.IsZero() {
+		job.AvailableAt = now
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = job.AvailableAt
+	}
+	if job.UpdatedAt.IsZero() {
+		job.UpdatedAt = job.CreatedAt
+	}
+	payload, err := marshalJSON(event.Payload, "{}")
+	if err != nil {
+		return domain.FlowExecution{}, false, err
+	}
+	if event.PayloadHash == "" {
+		sum := sha256.Sum256([]byte(payload))
+		event.PayloadHash = hex.EncodeToString(sum[:])
+	}
+	providerIDs, err := marshalJSON(execution.ProviderRequestIDs, "[]")
+	if err != nil {
+		return domain.FlowExecution{}, false, err
+	}
+	jobPayload, err := marshalJSON(job.Payload, "{}")
+	if err != nil {
+		return domain.FlowExecution{}, false, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.FlowExecution{}, false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO inbound_events
+		(id, workspace_id, connection_id, provider, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id, payload_json, payload_hash, received_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id) DO NOTHING`,
+		event.ID, event.WorkspaceID, event.ConnectionID, event.Provider, event.SourceInstanceID, event.SourceProjectExternalID,
+		event.BehaviorKey, event.BehaviorVersion, event.DeliveryID, payload, event.PayloadHash, event.ReceivedAt.Format(time.RFC3339Nano)); err != nil {
+		return domain.FlowExecution{}, false, constraintError("accept inbound event", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM inbound_events WHERE workspace_id = ? AND source_instance_id = ? AND source_project_external_id = ? AND behavior_key = ? AND behavior_version = ? AND delivery_id = ?`, event.WorkspaceID, event.SourceInstanceID, event.SourceProjectExternalID, event.BehaviorKey, event.BehaviorVersion, event.DeliveryID).Scan(&event.ID); err != nil {
+		return domain.FlowExecution{}, false, fmt.Errorf("resolve accepted inbound event: %w", err)
+	}
+	execution.EventID = event.ID
+	result, err := tx.ExecContext(ctx, `INSERT INTO flow_executions
+		(id, workspace_id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, idempotency_key) DO NOTHING`, execution.ID, execution.WorkspaceID, execution.ConnectionID, execution.FlowID, execution.FlowVersionID, execution.FlowVersion, execution.EventID, execution.DeliveryID, execution.IdempotencyKey, execution.CorrelationID, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), execution.CreatedAt.Format(time.RFC3339Nano), execution.UpdatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return domain.FlowExecution{}, false, constraintError("accept FlowExecution", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return domain.FlowExecution{}, false, err
+	} else if affected == 0 {
+		var existingID string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM flow_executions WHERE workspace_id = ? AND idempotency_key = ?`, execution.WorkspaceID, execution.IdempotencyKey).Scan(&existingID); err != nil {
+			return domain.FlowExecution{}, false, fmt.Errorf("resolve duplicate FlowExecution: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return domain.FlowExecution{}, false, err
+		}
+		existing, err := s.GetFlowExecution(ctx, execution.WorkspaceID, domain.ID(existingID))
+		return existing, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO jobs
+		(id, workspace_id, kind, payload_json, available_at, lease_until, leased_by, attempt_count, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, job.ID, job.WorkspaceID, job.Kind, jobPayload, job.AvailableAt.Format(time.RFC3339Nano), formatOptionalTime(job.LeaseUntil), job.LeasedBy, job.AttemptCount, job.Status, job.CreatedAt.Format(time.RFC3339Nano), job.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
+		return domain.FlowExecution{}, false, constraintError("enqueue accepted FlowExecution", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.FlowExecution{}, false, err
+	}
+	created, err := s.GetFlowExecution(ctx, execution.WorkspaceID, execution.ID)
+	return created, true, err
+}
+
 func (s *Store) SaveInboundEvent(ctx context.Context, event domain.InboundEvent) (domain.InboundEvent, error) {
 	if event.ID.Empty() {
 		event.ID = domain.NewID()
@@ -121,17 +243,17 @@ func (s *Store) CreateFlowExecution(ctx context.Context, execution domain.FlowEx
 		return fmt.Errorf("%w: execution FlowVersion belongs to another workspace", domain.ErrForbidden)
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO flow_executions
-		(id, workspace_id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, execution.ID, execution.WorkspaceID, execution.ConnectionID, execution.FlowID, execution.FlowVersionID, execution.FlowVersion, execution.EventID, execution.DeliveryID, execution.IdempotencyKey, execution.CorrelationID, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, execution.CreatedAt.Format(time.RFC3339Nano), execution.UpdatedAt.Format(time.RFC3339Nano))
+		(id, workspace_id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, execution.ID, execution.WorkspaceID, execution.ConnectionID, execution.FlowID, execution.FlowVersionID, execution.FlowVersion, execution.EventID, execution.DeliveryID, execution.IdempotencyKey, execution.CorrelationID, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, execution.ErrorMessage, execution.CreatedAt.Format(time.RFC3339Nano), execution.UpdatedAt.Format(time.RFC3339Nano))
 	return constraintError("create FlowExecution", err)
 }
 
 func (s *Store) GetFlowExecution(ctx context.Context, workspaceID, executionID domain.ID) (domain.FlowExecution, error) {
 	var execution domain.FlowExecution
 	var providerIDs, created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, created_at, updated_at
+	err := s.db.QueryRowContext(ctx, `SELECT id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at
 		FROM flow_executions WHERE workspace_id = ? AND id = ?`, workspaceID, executionID).Scan(
-		&execution.ID, &execution.ConnectionID, &execution.FlowID, &execution.FlowVersionID, &execution.FlowVersion, &execution.EventID, &execution.DeliveryID, &execution.IdempotencyKey, &execution.CorrelationID, &execution.Status, &execution.CurrentNodeID, &providerIDs, &execution.ErrorCategory, &created, &updated)
+		&execution.ID, &execution.ConnectionID, &execution.FlowID, &execution.FlowVersionID, &execution.FlowVersion, &execution.EventID, &execution.DeliveryID, &execution.IdempotencyKey, &execution.CorrelationID, &execution.Status, &execution.CurrentNodeID, &providerIDs, &execution.ErrorCategory, &execution.ErrorMessage, &created, &updated)
 	if err == sql.ErrNoRows {
 		return domain.FlowExecution{}, fmt.Errorf("%w: FlowExecution %s", domain.ErrNotFound, executionID)
 	}
@@ -161,7 +283,7 @@ func (s *Store) UpdateFlowExecution(ctx context.Context, execution domain.FlowEx
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE flow_executions SET status = ?, current_node_id = ?, provider_request_ids_json = ?, error_category = ?, updated_at = ? WHERE workspace_id = ? AND id = ?`, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, s.now().Format(time.RFC3339Nano), execution.WorkspaceID, execution.ID)
+	result, err := s.db.ExecContext(ctx, `UPDATE flow_executions SET status = ?, current_node_id = ?, provider_request_ids_json = ?, error_category = ?, error_message = ?, updated_at = ? WHERE workspace_id = ? AND id = ?`, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), s.now().Format(time.RFC3339Nano), execution.WorkspaceID, execution.ID)
 	if err != nil {
 		return fmt.Errorf("update FlowExecution: %w", err)
 	}
@@ -231,8 +353,8 @@ func (s *Store) CreateNodeExecution(ctx context.Context, node domain.NodeExecuti
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO node_executions
-		(id, workspace_id, execution_id, node_id, status, attempt, input_snapshot_json, output_snapshot_json, error_category, provider_request_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.ID, node.WorkspaceID, node.ExecutionID, node.NodeID, node.Status, node.Attempt, input, output, node.ErrorCategory, node.ProviderRequestID)
+		(id, workspace_id, execution_id, node_id, status, attempt, input_snapshot_json, output_snapshot_json, error_category, error_message, provider_request_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.ID, node.WorkspaceID, node.ExecutionID, node.NodeID, node.Status, node.Attempt, input, output, node.ErrorCategory, truncateMessage(node.ErrorMessage), node.ProviderRequestID)
 	return constraintError("create NodeExecution", err)
 }
 
@@ -245,7 +367,7 @@ func (s *Store) UpdateNodeExecution(ctx context.Context, node domain.NodeExecuti
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE node_executions SET status = ?, input_snapshot_json = ?, output_snapshot_json = ?, error_category = ?, provider_request_id = ? WHERE workspace_id = ? AND id = ?`, node.Status, input, output, node.ErrorCategory, node.ProviderRequestID, node.WorkspaceID, node.ID)
+	result, err := s.db.ExecContext(ctx, `UPDATE node_executions SET status = ?, input_snapshot_json = ?, output_snapshot_json = ?, error_category = ?, error_message = ?, provider_request_id = ? WHERE workspace_id = ? AND id = ?`, node.Status, input, output, node.ErrorCategory, truncateMessage(node.ErrorMessage), node.ProviderRequestID, node.WorkspaceID, node.ID)
 	if err != nil {
 		return err
 	}
@@ -258,7 +380,7 @@ func (s *Store) UpdateNodeExecution(ctx context.Context, node domain.NodeExecuti
 }
 
 func (s *Store) ListNodeExecutions(ctx context.Context, workspaceID, executionID domain.ID) ([]domain.NodeExecution, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, status, attempt, input_snapshot_json, output_snapshot_json, error_category, provider_request_id FROM node_executions WHERE workspace_id = ? AND execution_id = ? ORDER BY attempt, node_id`, workspaceID, executionID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, status, attempt, input_snapshot_json, output_snapshot_json, error_category, error_message, provider_request_id FROM node_executions WHERE workspace_id = ? AND execution_id = ? ORDER BY attempt, node_id`, workspaceID, executionID)
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +389,7 @@ func (s *Store) ListNodeExecutions(ctx context.Context, workspaceID, executionID
 	for rows.Next() {
 		var item domain.NodeExecution
 		var input, output string
-		if err := rows.Scan(&item.ID, &item.NodeID, &item.Status, &item.Attempt, &input, &output, &item.ErrorCategory, &item.ProviderRequestID); err != nil {
+		if err := rows.Scan(&item.ID, &item.NodeID, &item.Status, &item.Attempt, &input, &output, &item.ErrorCategory, &item.ErrorMessage, &item.ProviderRequestID); err != nil {
 			return nil, err
 		}
 		item.WorkspaceID, item.ExecutionID = workspaceID, executionID
@@ -356,7 +478,7 @@ func (s *Store) ClaimNextJob(ctx context.Context, workerID string, lease time.Du
 	return job, nil
 }
 
-func (s *Store) CompleteJob(ctx context.Context, workspaceID domain.ID, jobID, workerID domain.ID) error {
+func (s *Store) CompleteJob(ctx context.Context, workspaceID, jobID domain.ID, workerID string) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE jobs SET status = 'succeeded', lease_until = NULL, leased_by = '', updated_at = ? WHERE workspace_id = ? AND id = ? AND leased_by = ?`, s.now().Format(time.RFC3339Nano), workspaceID, jobID, workerID)
 	if err != nil {
 		return err
@@ -427,9 +549,9 @@ func (s *Store) UpsertCorrelation(ctx context.Context, correlation domain.Correl
 		correlation.CreatedAt = s.now()
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO correlations
-		(id, workspace_id, connection_id, source_identity, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(workspace_id, connection_id, source_identity, publication_identity) DO UPDATE SET target_identity = excluded.target_identity, flow_execution_id = excluded.flow_execution_id, provider_request_id = excluded.provider_request_id`, correlation.ID, correlation.WorkspaceID, correlation.ConnectionID, correlation.SourceIdentity, correlation.PublicationIdentity, correlation.TargetIdentity, nullID(correlation.FlowExecutionID), correlation.ProviderRequestID, correlation.CreatedAt.Format(time.RFC3339Nano))
+		(id, workspace_id, connection_id, source_identity, source_issue_iid, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, connection_id, source_identity, publication_identity) DO UPDATE SET source_issue_iid = excluded.source_issue_iid, target_identity = excluded.target_identity, flow_execution_id = excluded.flow_execution_id, provider_request_id = excluded.provider_request_id`, correlation.ID, correlation.WorkspaceID, correlation.ConnectionID, correlation.SourceIdentity, correlation.SourceIssueIID, correlation.PublicationIdentity, correlation.TargetIdentity, nullID(correlation.FlowExecutionID), correlation.ProviderRequestID, correlation.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return domain.Correlation{}, constraintError("upsert correlation", err)
 	}
@@ -440,7 +562,7 @@ func (s *Store) GetCorrelation(ctx context.Context, workspaceID, connectionID do
 	var item domain.Correlation
 	var flowExecution sql.NullString
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id, source_identity, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at FROM correlations WHERE workspace_id = ? AND connection_id = ? AND source_identity = ? AND publication_identity = ?`, workspaceID, connectionID, sourceIdentity, publicationIdentity).Scan(&item.ID, &item.SourceIdentity, &item.PublicationIdentity, &item.TargetIdentity, &flowExecution, &item.ProviderRequestID, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id, source_identity, source_issue_iid, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at FROM correlations WHERE workspace_id = ? AND connection_id = ? AND source_identity = ? AND publication_identity = ?`, workspaceID, connectionID, sourceIdentity, publicationIdentity).Scan(&item.ID, &item.SourceIdentity, &item.SourceIssueIID, &item.PublicationIdentity, &item.TargetIdentity, &flowExecution, &item.ProviderRequestID, &created)
 	if err == sql.ErrNoRows {
 		return domain.Correlation{}, fmt.Errorf("%w: correlation %s", domain.ErrNotFound, publicationIdentity)
 	}
@@ -456,7 +578,7 @@ func (s *Store) GetCorrelation(ctx context.Context, workspaceID, connectionID do
 }
 
 func (s *Store) ListActiveHookRoutesForEvent(ctx context.Context, workspaceID, sourceInstanceID domain.ID, sourceProject, behaviorKey, behaviorVersion string) ([]domain.HookRoute, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.connection_id, r.flow_id, r.flow_version, r.event_filter_json, r.hook_id, r.status FROM hook_routes r JOIN connections c ON c.id = r.connection_id AND c.workspace_id = r.workspace_id WHERE r.workspace_id = ? AND r.source_instance_id = ? AND r.source_project_external_id = ? AND r.behavior_key = ? AND r.behavior_version = ? AND r.status = 'active' AND c.status <> 'disabled' ORDER BY r.flow_id, r.flow_version`, workspaceID, sourceInstanceID, sourceProject, behaviorKey, behaviorVersion)
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.connection_id, r.flow_id, r.flow_version, r.event_filter_json, r.hook_id, r.status FROM hook_routes r JOIN connections c ON c.id = r.connection_id AND c.workspace_id = r.workspace_id JOIN flows f ON f.id = r.flow_id AND f.workspace_id = r.workspace_id JOIN flow_versions v ON v.flow_id = r.flow_id AND v.workspace_id = r.workspace_id AND v.version = r.flow_version WHERE r.workspace_id = ? AND r.source_instance_id = ? AND r.source_project_external_id = ? AND r.behavior_key = ? AND r.behavior_version = ? AND r.status = 'active' AND c.status <> 'disabled' AND f.status = 'published' AND v.status = 'published' ORDER BY r.flow_id, r.flow_version`, workspaceID, sourceInstanceID, sourceProject, behaviorKey, behaviorVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +600,45 @@ func (s *Store) ListActiveHookRoutesForEvent(ctx context.Context, workspaceID, s
 	return result, rows.Err()
 }
 
+// ListHookRoutesForProject is used by ingress before a Workspace is known.
+// The returned rows still carry their Workspace and instance identities; the
+// caller must verify the hook secret before accepting an event.
+func (s *Store) ListHookRoutesForProject(ctx context.Context, sourceInstanceID domain.ID, sourceProject string) ([]domain.HookRoute, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.workspace_id, r.connection_id, r.source_instance_id, r.source_project_external_id, r.behavior_key, r.behavior_version, r.flow_id, r.flow_version, r.event_filter_json, r.hook_id, r.status
+		FROM hook_routes r JOIN connections c ON c.id = r.connection_id AND c.workspace_id = r.workspace_id
+		JOIN flows f ON f.id = r.flow_id AND f.workspace_id = r.workspace_id
+		JOIN flow_versions v ON v.flow_id = r.flow_id AND v.workspace_id = r.workspace_id AND v.version = r.flow_version
+		WHERE (? = '' OR r.source_instance_id = ?) AND r.source_project_external_id = ? AND r.status = 'active' AND c.status <> 'disabled' AND f.status = 'published' AND v.status = 'published'
+		ORDER BY r.workspace_id, r.flow_id, r.flow_version`, string(sourceInstanceID), sourceInstanceID, sourceProject)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []domain.HookRoute
+	for rows.Next() {
+		var item domain.HookRoute
+		var workspace, instance, project, filter string
+		if err := rows.Scan(&item.ID, &workspace, &item.ConnectionID, &instance, &project, &item.BehaviorKey, &item.BehaviorVersion, &item.FlowID, &item.FlowVersion, &filter, &item.HookRef, &item.Status); err != nil {
+			return nil, err
+		}
+		item.WorkspaceID = domain.ID(workspace)
+		item.SourceProject = domain.ProviderProjectRef{InstanceID: domain.ID(instance), ExternalID: project}
+		if err := json.Unmarshal([]byte(filter), &item.EventFilter); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) DisableHookRoutesForConnection(ctx context.Context, workspaceID, connectionID domain.ID) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE hook_routes SET status = 'disabled' WHERE workspace_id = ? AND connection_id = ?`, workspaceID, connectionID)
 	return err
+}
+
+func truncateMessage(message string) string {
+	if len(message) > 1000 {
+		return message[:1000]
+	}
+	return message
 }

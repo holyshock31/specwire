@@ -306,6 +306,7 @@ type MulticaInstance struct {
 type ProviderProjectRef struct {
 	InstanceID ID     `json:"instance_id"`
 	ExternalID string `json:"external_id"`
+	GroupID    string `json:"group_id,omitempty"`
 	FullPath   string `json:"full_path,omitempty"`
 	Name       string `json:"name,omitempty"`
 	WebURL     string `json:"web_url,omitempty"`
@@ -508,6 +509,7 @@ type FlowExecution struct {
 	CurrentNodeID      ID              `json:"current_node_id,omitempty"`
 	ProviderRequestIDs []string        `json:"provider_request_ids,omitempty"`
 	ErrorCategory      string          `json:"error_category,omitempty"`
+	ErrorMessage       string          `json:"error_message,omitempty"`
 	CreatedAt          time.Time       `json:"created_at"`
 	UpdatedAt          time.Time       `json:"updated_at"`
 }
@@ -522,6 +524,7 @@ type NodeExecution struct {
 	InputSnapshot     map[string]any      `json:"input_snapshot,omitempty"`
 	OutputSnapshot    map[string]any      `json:"output_snapshot,omitempty"`
 	ErrorCategory     string              `json:"error_category,omitempty"`
+	ErrorMessage      string              `json:"error_message,omitempty"`
 	ProviderRequestID string              `json:"provider_request_id,omitempty"`
 }
 
@@ -570,6 +573,7 @@ type Correlation struct {
 	WorkspaceID         ID        `json:"workspace_id"`
 	ConnectionID        ID        `json:"connection_id"`
 	SourceIdentity      string    `json:"source_identity"`
+	SourceIssueIID      int       `json:"source_issue_iid,omitempty"`
 	PublicationIdentity string    `json:"publication_identity"`
 	TargetIdentity      string    `json:"target_identity,omitempty"`
 	FlowExecutionID     ID        `json:"flow_execution_id,omitempty"`
