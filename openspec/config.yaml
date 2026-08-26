@@ -12,6 +12,8 @@ context: |
     发布者按次指定 SpecWire-Status/Assignee；branch_head_sha 是冻结基线；issue_links 保存发布 Issue 关联。
   - 端到端场景：本地 Skill 创建 feat/fix 分支并运行 opsx:propose、commit/push、创建 GitLab Issue；Multica/Agent 执行与 MR 评审属于客户端/执行系统；archive Skill push 后由 Bridge 完成投影和 Issue 闭环。
   - 文档语言：中文为主，术语保留英文。
+  - 文档生命周期：openspec/drafts/ 保存未成形探索，openspec/changes/<change-id>/ 保存一次完整变更，openspec/specs/ 保存当前已接受知识。
+  - 已发布知识按 behavior、domain、architecture、experience 分目录；draft 和 change 中的材料通过评审后按类型合并到对应目录。
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
@@ -33,4 +35,4 @@ operations:
   archive:
     guidance:
       - 归档提交必须带 archived trailer 并 push main
-      - 归档后核对 Multica 卡 done 与（v2）GitLab Issue 关闭
+      - 归档时按 behavior/domain/architecture/experience 分类合并变更，并核对 Multica 卡 done 与（v2）GitLab Issue 关闭
