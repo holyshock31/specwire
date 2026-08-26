@@ -236,11 +236,12 @@ func (r *HookReconciler) hookURLForInstance(instanceID domain.ID) string {
 
 func eventsForBehavior(behavior domain.ConnectorBehavior, node domain.FlowNode) []string {
 	key := strings.ToLower(behavior.Key + " " + node.Name)
-	if strings.Contains(key, "issue") {
-		return []string{"Issue Hook"}
-	}
-	if strings.Contains(key, "push") || strings.Contains(key, "archive") {
-		return []string{"Push Hook"}
+	if strings.Contains(key, "issue") || strings.Contains(key, "push") || strings.Contains(key, "archive") {
+		// GitLab has one shared SpecWire endpoint per source project.  Always
+		// reconcile the union needed by the MVP lifecycle so publishing an
+		// archive Flow cannot accidentally remove the Issue subscription (or
+		// vice versa) when the provider updates the existing Hook.
+		return []string{"Issue Hook", "Push Hook"}
 	}
 	return []string{"Issue Hook", "Push Hook"}
 }

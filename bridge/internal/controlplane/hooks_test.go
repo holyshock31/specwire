@@ -103,6 +103,9 @@ func TestHookReconcilerSharesHookAcrossPublishedInputFlows(t *testing.T) {
 	if gitlab.ensureCalls != 2 || len(gitlab.lastSpec.SigningToken) == 0 {
 		t.Fatalf("Hook calls/token = %d/%q", gitlab.ensureCalls, gitlab.lastSpec.SigningToken)
 	}
+	if len(gitlab.lastSpec.Events) != 2 || gitlab.lastSpec.Events[0] != "Issue Hook" || gitlab.lastSpec.Events[1] != "Push Hook" {
+		t.Fatalf("shared Hook events = %v, want Issue Hook and Push Hook", gitlab.lastSpec.Events)
+	}
 	hook, err := s.GetHookByProject(ctx, workspaceID, gitlabInstance.ID, "source-1")
 	if err != nil {
 		t.Fatal(err)
