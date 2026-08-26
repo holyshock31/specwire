@@ -501,6 +501,55 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request, sessi
 		}
 		s.audit(r.Context(), session.AccountID, "connection.disable", "connection", connection.ID, map[string]any{"workspace_id": workspaceID})
 		w.WriteHeader(http.StatusNoContent)
+	case "deprovision":
+		plan := func() (controlplane.DeprovisionPlan, error) {
+			current, err := store.GetConnection(r.Context(), workspaceID, connection.ID)
+			if err != nil {
+				return controlplane.DeprovisionPlan{}, err
+			}
+			resources, err := store.ListManagedResources(r.Context(), workspaceID, connection.ID)
+			if err != nil {
+				return controlplane.DeprovisionPlan{}, err
+			}
+			return controlplane.BuildDeprovisionPlan(current, resources), nil
+		}
+		if r.Method == http.MethodGet {
+			value, err := plan()
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, value)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		var request struct {
+			Confirm bool `json:"confirm"`
+		}
+		if !decodeJSON(w, r, &request) {
+			return
+		}
+		if !request.Confirm {
+			writeError(w, fmt.Errorf("%w: deprovision requires confirm=true", domain.ErrInvalid))
+			return
+		}
+		// Unbinding is deliberately limited to the SpecWire control plane.  The
+		// provider project, adopted resources, shared Hook and execution history
+		// remain in place for explicit, separately reviewed cleanup.
+		if err := store.DisableConnection(r.Context(), workspaceID, connection.ID); err != nil {
+			writeError(w, err)
+			return
+		}
+		value, err := plan()
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		s.audit(r.Context(), session.AccountID, "connection.deprovision.request", "connection", connection.ID, map[string]any{"workspace_id": workspaceID, "external_deletion_planned": false})
+		writeJSON(w, http.StatusOK, map[string]any{"deprovision_requested": true, "plan": value})
 	case "resources":
 		if r.Method != http.MethodGet {
 			http.NotFound(w, r)

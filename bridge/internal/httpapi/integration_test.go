@@ -227,6 +227,18 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(body, `"valid":true`) || strings.Contains(body, `model_not_found`) {
 		t.Fatalf("custom model Flow validation = %d %s", status, body)
 	}
+	status, body = jsonRequest(t, client, http.MethodGet, base+"/connections/connection-api/deprovision", "", nil)
+	if status != http.StatusOK || !strings.Contains(body, `"external_deletion_planned":false`) || !strings.Contains(body, `"history_retained":true`) {
+		t.Fatalf("deprovision preview = %d %s", status, body)
+	}
+	status, _ = jsonRequest(t, client, http.MethodPost, base+"/connections/connection-api/deprovision", `{"confirm":false}`, csrf)
+	if status != http.StatusBadRequest {
+		t.Fatalf("unconfirmed deprovision = %d", status)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/connections/connection-api/deprovision", `{"confirm":true}`, csrf)
+	if status != http.StatusOK || !strings.Contains(body, `"deprovision_requested":true`) || !strings.Contains(body, `"status":"disabled"`) {
+		t.Fatalf("deprovision request = %d %s", status, body)
+	}
 }
 
 func TestGroupCredentialAPIDoesNotExposeSecretAndSupportsRotation(t *testing.T) {

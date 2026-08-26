@@ -150,6 +150,28 @@ func TestConnectionOnboardingCreatesProjectAndBothResourceContexts(t *testing.T)
 	if second.Connection.ID != result.Connection.ID || multica.created != 1 || len(second.Resources) != 3 {
 		t.Fatalf("retry duplicated onboarding: connection=%s project_creates=%d resources=%d", second.Connection.ID, multica.created, len(second.Resources))
 	}
+	plan, err := service.DeprovisionCheck(ctx, "workspace-onboarding", result.Connection.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.ExternalDeletionPlanned || !plan.HistoryRetained || len(plan.Checks) != 3 {
+		t.Fatalf("deprovision plan = %+v", plan)
+	}
+	for _, check := range plan.Checks {
+		if !check.EligibleForManual || check.ExternalDeletion || check.Action != "manual-provider-deprovision-eligible" {
+			t.Fatalf("created resource check = %+v", check)
+		}
+	}
+	if err := s.DisableConnection(ctx, "workspace-onboarding", result.Connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	afterDisable, err := service.DeprovisionCheck(ctx, "workspace-onboarding", result.Connection.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterDisable.Connection.Status != domain.ConnectionDisabled || afterDisable.RequiresConfirmation {
+		t.Fatalf("disabled deprovision plan = %+v", afterDisable)
+	}
 }
 
 func TestConnectionOnboardingConflictDoesNotCreateTarget(t *testing.T) {

@@ -118,6 +118,72 @@ type OnboardingResult struct {
 	Ready      bool
 }
 
+// ResourceDeprovisionCheck makes the destructive boundary explicit.  The MVP
+// can identify resources that SpecWire created, but it intentionally does not
+// delete provider objects as part of unbinding a Connection.
+type ResourceDeprovisionCheck struct {
+	Resource          domain.ManagedResource `json:"resource"`
+	EligibleForManual bool                   `json:"eligible_for_manual_deprovision"`
+	ExternalDeletion  bool                   `json:"external_deletion"`
+	Action            string                 `json:"action"`
+	Reason            string                 `json:"reason,omitempty"`
+}
+
+type DeprovisionPlan struct {
+	WorkspaceID             domain.ID                  `json:"workspace_id"`
+	ConnectionID            domain.ID                  `json:"connection_id"`
+	Connection              domain.Connection          `json:"connection"`
+	RequiresConfirmation    bool                       `json:"requires_confirmation"`
+	ExternalDeletionPlanned bool                       `json:"external_deletion_planned"`
+	HistoryRetained         bool                       `json:"history_retained"`
+	Checks                  []ResourceDeprovisionCheck `json:"checks"`
+}
+
+// DeprovisionCheck is read-only.  It is used both for the preview and after a
+// confirmed unbind so the API never implies that an external provider object
+// was deleted when only the SpecWire binding was disabled.
+func (s *ConnectionService) DeprovisionCheck(ctx context.Context, workspaceID, connectionID domain.ID) (DeprovisionPlan, error) {
+	connection, err := s.store.GetConnection(ctx, workspaceID, connectionID)
+	if err != nil {
+		return DeprovisionPlan{}, err
+	}
+	resources, err := s.store.ListManagedResources(ctx, workspaceID, connectionID)
+	if err != nil {
+		return DeprovisionPlan{}, err
+	}
+	return BuildDeprovisionPlan(connection, resources), nil
+}
+
+// BuildDeprovisionPlan contains the policy-only part of DeprovisionCheck so
+// transports can render a preview even when provider clients are not wired in
+// (for example, a read-only API test or a control-plane maintenance process).
+func BuildDeprovisionPlan(connection domain.Connection, resources []domain.ManagedResource) DeprovisionPlan {
+	checks := make([]ResourceDeprovisionCheck, 0, len(resources))
+	for _, resource := range resources {
+		check := ResourceDeprovisionCheck{Resource: resource, ExternalDeletion: false, Action: "retain"}
+		switch {
+		case resource.Ownership == domain.OwnershipManaged && resource.ManagementMark == "specwire-managed":
+			check.EligibleForManual = true
+			check.Action = "manual-provider-deprovision-eligible"
+			check.Reason = "SpecWire created this resource, but MVP unbind never deletes provider objects"
+		case resource.Ownership == domain.OwnershipAdopted:
+			check.Reason = "adopted provider resource is retained"
+		default:
+			check.Reason = "external or unmarked provider resource is retained"
+		}
+		checks = append(checks, check)
+	}
+	return DeprovisionPlan{
+		WorkspaceID:             connection.WorkspaceID,
+		ConnectionID:            connection.ID,
+		Connection:              connection,
+		RequiresConfirmation:    connection.Status != domain.ConnectionDisabled,
+		ExternalDeletionPlanned: false,
+		HistoryRetained:         true,
+		Checks:                  checks,
+	}
+}
+
 func (s *ConnectionService) Onboard(ctx context.Context, request OnboardingRequest) (OnboardingResult, error) {
 	if err := request.validate(); err != nil {
 		return OnboardingResult{}, err
