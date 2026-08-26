@@ -1,0 +1,24 @@
+{
+  "key": "MulticaCreateIssueInput",
+  "version": "v1",
+  "display_name": "Multica Create Issue Input",
+  "description": "Target action input for creating a Multica issue.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "target_project": {"type": "string"},
+      "title": {"type": "string"},
+      "description": {"type": "string"},
+      "status": {"type": "string", "default": "backlog"},
+      "assignee": {"type": "string"}
+    }
+  },
+  "required_fields": ["target_project", "title", "description"],
+  "semantic_roles": {
+    "target_project": "target_project_identity",
+    "title": "issue_title",
+    "description": "issue_description"
+  },
+  "allow_extensions": false,
+  "status": "published"
+}

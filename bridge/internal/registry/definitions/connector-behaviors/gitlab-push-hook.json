@@ -1,0 +1,17 @@
+{
+  "connector_type_key": "gitlab",
+  "connector_type_version": "1.0.0",
+  "key": "gitlab.push-hook",
+  "version": "1.0.0",
+  "display_name": "GitLab Push Hook",
+  "direction": "input",
+  "provider_event_schema": {
+    "type": "object",
+    "required": ["ref", "after", "project", "commits"]
+  },
+  "required_capabilities": ["gitlab.project.webhook.read"],
+  "adapter_operation": "gitlab.events.push",
+  "idempotency_strategy": "provider_delivery_id",
+  "reconciliation": "delivery_lookup",
+  "status": "published"
+}

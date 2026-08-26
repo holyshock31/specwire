@@ -1,0 +1,11 @@
+{
+  "key": "gitlab",
+  "version": "1.0.0",
+  "display_name": "GitLab",
+  "provider": "gitlab",
+  "status": "published",
+  "metadata": {
+    "category": "source-control",
+    "supports_shared_hook": true
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "connector_type_key": "gitlab",
+  "connector_type_version": "1.0.0",
+  "key": "gitlab.issue-hook",
+  "version": "1.0.0",
+  "display_name": "GitLab Issue Hook",
+  "direction": "input",
+  "provider_event_schema": {
+    "type": "object",
+    "required": ["object_kind", "object_attributes", "project"]
+  },
+  "required_capabilities": ["gitlab.project.webhook.read"],
+  "adapter_operation": "gitlab.events.issue",
+  "idempotency_strategy": "provider_delivery_id",
+  "reconciliation": "delivery_lookup",
+  "status": "published"
+}

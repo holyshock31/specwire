@@ -2,13 +2,13 @@
 
 ## 1. Domain and persistence foundation
 
-- [ ] 1.1 Define Workspace, Account, IdentityProvider, WorkspaceMembership, ScopedRoleBinding, GitLabInstance, GitLabGroupBinding, MulticaInstance, Connection, ManagedResource, HookRoute, ConnectorType, ConnectorBehavior, DataModelDefinition, Flow, FlowTemplate, FlowVersion, FlowExecution, NodeExecution, AuditEvent, and correlation models with explicit Workspace ownership.
-- [ ] 1.2 Replace the Flow-level `ConnectorInstance` vocabulary with ConnectorNode = behavior + parameter bindings while retaining GitLab/Multica endpoint profiles as control-plane records; add migration tests for the terminology and identity rules.
-- [ ] 1.3 Add database migrations, foreign keys, and uniqueness constraints for Workspace isolation, one-to-one active Connections, published Flow versions, provider external IDs, route ownership, idempotency keys, and managed-resource ownership.
-- [ ] 1.4 Add secret-reference storage and redaction boundaries for login provider secrets, Group credentials, optional Multica control-plane credentials, and Hook signing secrets; keep runtime checkout credentials outside the control plane and test that plaintext secret material cannot appear in API responses, Flow definitions, snapshots, or audit records.
-- [ ] 1.5 Implement declarative registry loading for built-in ConnectorType/Behavior and DataModel definitions, with stable keys, versions, schemas, semantic roles, and adapter-operation references; verify repeated bootstrap is idempotent.
-- [ ] 1.6 Implement versioned Flow graph persistence for nodes, ports, edges, behavior/model references, parameter bindings, filters, and compiled-plan metadata; add round-trip tests for drafts and published versions.
-- [ ] 1.7 Add unit tests for cross-Workspace query/mutation isolation, provider external-ID uniqueness, Connection conflicts, immutable version references, and concurrent idempotency claims.
+- [x] 1.1 Define Workspace, Account, IdentityProvider, WorkspaceMembership, ScopedRoleBinding, GitLabInstance, GitLabGroupBinding, MulticaInstance, Connection, ManagedResource, HookRoute, ConnectorType, ConnectorBehavior, DataModelDefinition, Flow, FlowTemplate, FlowVersion, FlowExecution, NodeExecution, AuditEvent, and correlation models with explicit Workspace ownership.
+- [x] 1.2 Replace the Flow-level `ConnectorInstance` vocabulary with ConnectorNode = behavior + parameter bindings while retaining GitLab/Multica endpoint profiles as control-plane records; add migration tests for the terminology and identity rules.
+- [x] 1.3 Add database migrations, foreign keys, and uniqueness constraints for Workspace isolation, one-to-one active Connections, published Flow versions, provider external IDs, route ownership, idempotency keys, and managed-resource ownership.
+- [x] 1.4 Add secret-reference storage and redaction boundaries for login provider secrets, Group credentials, optional Multica control-plane credentials, and Hook signing secrets; keep runtime checkout credentials outside the control plane and test that plaintext secret material cannot appear in API responses, Flow definitions, snapshots, or audit records.
+- [x] 1.5 Implement declarative registry loading for built-in ConnectorType/Behavior and DataModel definitions, with stable keys, versions, schemas, semantic roles, and adapter-operation references; verify repeated bootstrap is idempotent.
+- [x] 1.6 Implement versioned Flow graph persistence for nodes, ports, edges, behavior/model references, parameter bindings, filters, and compiled-plan metadata; add round-trip tests for drafts and published versions.
+- [x] 1.7 Add unit tests for cross-Workspace query/mutation isolation, provider external-ID uniqueness, Connection conflicts, immutable version references, and concurrent idempotency claims.
 
 ## 2. Workspace identity and provider configuration
 

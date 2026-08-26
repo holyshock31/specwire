@@ -1,0 +1,11 @@
+{
+  "key": "multica",
+  "version": "1.0.0",
+  "display_name": "Multica",
+  "provider": "multica",
+  "status": "published",
+  "metadata": {
+    "category": "work-management",
+    "runtime_access": "glab-managed"
+  }
+}
