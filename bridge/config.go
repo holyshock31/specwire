@@ -3,10 +3,12 @@ package main
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -27,6 +29,8 @@ type Config struct {
 	GitLabURL        string            // SPECWIRE_GITLAB_URL：GitLab API 基址（容器网络内可达）
 	WebhookURL       string            // SPECWIRE_WEBHOOK_URL：GitLab webhook 回调地址（hook 自动编排用，admin API）
 	AdminToken       string            // SPECWIRE_ADMIN_TOKEN：admin API 访问 token（未配置时仅回环可访问）
+	PersistentOnly   bool              // SPECWIRE_PERSISTENT_ONLY：跳过旧 .env 路由配置，仅运行持久化控制面
+	RetentionDays    int               // SPECWIRE_RETENTION_DAYS：脱敏事件/节点快照的保留天数
 }
 
 func getenv(key, def string) string {
@@ -43,21 +47,35 @@ func LoadConfig() (*Config, error) {
 		ListenAddr:     getenv("SPECWIRE_LISTEN_ADDR", "0.0.0.0:8787"),
 		DBPath:         getenv("SPECWIRE_DB_PATH", "./specwire-bridge.db"),
 		RefFilter:      getenv("SPECWIRE_REF_FILTER", "refs/heads/main"),
+		RetentionDays:  30,
+	}
+	persistentOnly, err := parseBool(getenv("SPECWIRE_PERSISTENT_ONLY", "false"))
+	if err != nil {
+		return nil, fmt.Errorf("SPECWIRE_PERSISTENT_ONLY %q is not a valid boolean: %w", os.Getenv("SPECWIRE_PERSISTENT_ONLY"), err)
+	}
+	cfg.PersistentOnly = persistentOnly
+	if raw := strings.TrimSpace(os.Getenv("SPECWIRE_RETENTION_DAYS")); raw != "" {
+		days, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || days < 1 || days > 3650 {
+			return nil, fmt.Errorf("SPECWIRE_RETENTION_DAYS %q must be an integer from 1 to 3650", raw)
+		}
+		cfg.RetentionDays = days
 	}
 
 	cfg.AllowedProjects = parseList(os.Getenv("SPECWIRE_ALLOWED_PROJECTS"))
-	if len(cfg.AllowedProjects) == 0 {
+	if !cfg.PersistentOnly && len(cfg.AllowedProjects) == 0 {
 		return nil, fmt.Errorf("SPECWIRE_ALLOWED_PROJECTS is required (comma-separated GitLab path_with_namespace list)")
 	}
 
-	var err error
 	cfg.WebhookSecrets, err = loadWebhookSecrets()
 	if err != nil {
-		return nil, err
+		if !cfg.PersistentOnly || !errors.Is(err, errWebhookSecretsRequired) {
+			return nil, err
+		}
 	}
 
 	cfg.MulticaProjectID = os.Getenv("SPECWIRE_MULTICA_PROJECT_ID")
-	if cfg.MulticaProjectID == "" {
+	if !cfg.PersistentOnly && cfg.MulticaProjectID == "" {
 		return nil, fmt.Errorf("SPECWIRE_MULTICA_PROJECT_ID is required")
 	}
 
@@ -98,12 +116,21 @@ func loadWebhookSecrets() ([]string, error) {
 		return nil, err
 	}
 	if len(secrets) == 0 {
-		return nil, fmt.Errorf("SPECWIRE_WEBHOOK_SECRETS is required (comma-separated whsec_ signing tokens; legacy SPECWIRE_WEBHOOK_SECRET also accepted)")
+		return nil, errWebhookSecretsRequired
 	}
 	if legacy != "" && secretsRaw != "" && !slices.Contains(secrets, legacy) {
 		secrets = append(secrets, legacy)
 	}
 	return secrets, nil
+}
+
+var errWebhookSecretsRequired = errors.New("SPECWIRE_WEBHOOK_SECRETS is required (comma-separated whsec_ signing tokens; legacy SPECWIRE_WEBHOOK_SECRET also accepted)")
+
+func parseBool(value string) (bool, error) {
+	if strings.TrimSpace(value) == "" {
+		return false, nil
+	}
+	return strconv.ParseBool(strings.TrimSpace(value))
 }
 
 // parseSecrets 解析逗号分隔的 signing token 列表：

@@ -15,6 +15,7 @@ const (
 	JobKindFlowRetry   = "flow.retry"
 	maxWebhookBody     = 1 << 20
 	defaultWebhookAge  = 5 * time.Minute
+	defaultRetention   = 30 * 24 * time.Hour
 )
 
 // Store is the runtime-facing storage seam.  It intentionally contains
@@ -41,6 +42,13 @@ type Store interface {
 	FailJob(context.Context, domain.ID, domain.ID, string, *time.Time, string) error
 	GetCorrelation(context.Context, domain.ID, domain.ID, string, string) (domain.Correlation, error)
 	UpsertCorrelation(context.Context, domain.Correlation) (domain.Correlation, error)
+}
+
+// RetentionStore is optional for runtime implementations. The SQLite store
+// implements it; keeping the seam optional lets focused runtime fakes remain
+// small while the production worker performs periodic payload scrubbing.
+type RetentionStore interface {
+	PurgeExpiredRuntimePayloads(context.Context, time.Time) (int, error)
 }
 
 type SecretResolver interface {
@@ -74,6 +82,7 @@ type Ingress struct {
 	secrets     SecretResolver
 	maxBody     int
 	maxAge      time.Duration
+	retention   time.Duration
 	now         func() time.Time
 	behaviors   flow.Catalog
 	instanceURL bool
@@ -92,11 +101,19 @@ func WithWebhookLimits(maxBody int, maxAge time.Duration) IngressOption {
 	}
 }
 
+func WithRuntimeRetention(value time.Duration) IngressOption {
+	return func(i *Ingress) {
+		if value > 0 {
+			i.retention = value
+		}
+	}
+}
+
 func NewIngress(store Store, secrets SecretResolver, catalog flow.Catalog, options ...IngressOption) (*Ingress, error) {
 	if store == nil || secrets == nil {
 		return nil, invalid("runtime ingress dependencies are required")
 	}
-	ingress := &Ingress{store: store, secrets: secrets, maxBody: maxWebhookBody, maxAge: defaultWebhookAge, now: time.Now, behaviors: catalog}
+	ingress := &Ingress{store: store, secrets: secrets, maxBody: maxWebhookBody, maxAge: defaultWebhookAge, retention: defaultRetention, now: time.Now, behaviors: catalog}
 	for _, option := range options {
 		option(ingress)
 	}
@@ -111,6 +128,7 @@ type Executor struct {
 	credentials GitLabCredentialResolver
 	catalog     flow.Catalog
 	now         func() time.Time
+	retention   time.Duration
 }
 
 type ExecutorOption func(*Executor)
@@ -119,11 +137,19 @@ func WithGitLabCredentialResolver(resolver GitLabCredentialResolver) ExecutorOpt
 	return func(e *Executor) { e.credentials = resolver }
 }
 
+func WithExecutorRetention(value time.Duration) ExecutorOption {
+	return func(e *Executor) {
+		if value > 0 {
+			e.retention = value
+		}
+	}
+}
+
 func NewExecutor(store Store, gitlab GitLabAdapter, multica MulticaAdapter, secrets SecretResolver, catalog flow.Catalog, options ...ExecutorOption) (*Executor, error) {
 	if store == nil || gitlab == nil || multica == nil {
 		return nil, invalid("runtime executor dependencies are required")
 	}
-	e := &Executor{store: store, gitlab: gitlab, multica: multica, secrets: secrets, catalog: catalog, now: time.Now}
+	e := &Executor{store: store, gitlab: gitlab, multica: multica, secrets: secrets, catalog: catalog, retention: defaultRetention, now: time.Now}
 	for _, option := range options {
 		option(e)
 	}

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"specwire/bridge/internal/auth"
 	"specwire/bridge/internal/controlplane"
@@ -109,11 +110,14 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
-	executor, err := runtimenew.NewExecutor(store, gitlab, multica, vault, catalog, runtimenew.WithGitLabCredentialResolver(credentialResolver))
+	retention := time.Duration(cfg.RetentionDays) * 24 * time.Hour
+	executor, err := runtimenew.NewExecutor(store, gitlab, multica, vault, catalog,
+		runtimenew.WithGitLabCredentialResolver(credentialResolver),
+		runtimenew.WithExecutorRetention(retention))
 	if err != nil {
 		return nil, err
 	}
-	ingress, err := runtimenew.NewIngress(store, vault, catalog)
+	ingress, err := runtimenew.NewIngress(store, vault, catalog, runtimenew.WithRuntimeRetention(retention))
 	if err != nil {
 		return nil, err
 	}

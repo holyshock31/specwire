@@ -526,6 +526,7 @@ type NodeExecution struct {
 	ErrorCategory     string              `json:"error_category,omitempty"`
 	ErrorMessage      string              `json:"error_message,omitempty"`
 	ProviderRequestID string              `json:"provider_request_id,omitempty"`
+	RetentionUntil    *time.Time          `json:"retention_until,omitempty"`
 }
 
 type InboundEvent struct {
@@ -541,6 +542,7 @@ type InboundEvent struct {
 	Payload                 map[string]any `json:"payload,omitempty"`
 	PayloadHash             string         `json:"payload_hash"`
 	ReceivedAt              time.Time      `json:"received_at"`
+	RetentionUntil          *time.Time     `json:"retention_until,omitempty"`
 }
 
 type Job struct {

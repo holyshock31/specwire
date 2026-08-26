@@ -507,3 +507,18 @@ func TestAdminPageServed(t *testing.T) {
 		t.Error("page body missing api reference")
 	}
 }
+
+func TestIntegrationAdminPageServed(t *testing.T) {
+	stub := newGitlabStub(t)
+	h, _, _ := newTestAdmin(t, stub)
+	rec := adminRequest(t, h, http.MethodGet, "/admin/integrations", "", "10.0.0.5:1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, marker := range []string{"Flow Builder", "/api/v1/auth/login", "Connection Onboarding", "Execution Records"} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("new integration page missing %q", marker)
+		}
+	}
+}

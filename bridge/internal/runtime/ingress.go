@@ -147,6 +147,8 @@ func (i *Ingress) accept(ctx context.Context, envelope GitLabEnvelope) (IngressR
 		matched = true
 		for _, payload := range payloads {
 			action := actionIdentity(envelope.EventName, envelope.DeliveryID, payload)
+			receivedAt := i.now().UTC()
+			retentionUntil := receivedAt.Add(i.retention)
 			execution := domain.FlowExecution{
 				ID:             domain.NewID(),
 				WorkspaceID:    route.WorkspaceID,
@@ -172,6 +174,8 @@ func (i *Ingress) accept(ctx context.Context, envelope GitLabEnvelope) (IngressR
 				DeliveryID:              actionDeliveryID(envelope, payload),
 				Payload:                 security.RedactValue(payload).(map[string]any),
 				PayloadHash:             rawHash(envelope.RawBody),
+				ReceivedAt:              receivedAt,
+				RetentionUntil:          &retentionUntil,
 			}
 			job := domain.Job{ID: domain.NewID(), WorkspaceID: route.WorkspaceID, Kind: JobKindFlowExecute, Payload: map[string]any{
 				"execution_id":  execution.ID,

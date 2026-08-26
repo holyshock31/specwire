@@ -27,21 +27,26 @@ func main() {
 		slog.Error("config load failed", "error", err)
 		os.Exit(1)
 	}
-	// SPECWIRE_PROJECT_MAP（可选）：GitLab path → Multica project 映射（D20）。
-	// 配置了映射时必须覆盖 allowlist 全部项目；未配置时回退默认 project（旧行为）。
-	if err := loadProjectMap(cfg); err != nil {
-		slog.Error("project map load failed", "error", err)
-		os.Exit(1)
+	// SPECWIRE_PROJECT_MAP 只在兼容导入窗口内读取。持久化-only 模式不
+	// 允许旧进程级映射成为第二个活动路由源。
+	if !cfg.PersistentOnly {
+		if err := loadProjectMap(cfg); err != nil {
+			slog.Error("project map load failed", "error", err)
+			os.Exit(1)
+		}
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})))
 
-	legacyStore, err := OpenStore(cfg.DBPath)
-	if err != nil {
-		slog.Error("store open failed", "path", cfg.DBPath, "error", err)
-		os.Exit(1)
+	var legacyStore *Store
+	if !cfg.PersistentOnly {
+		legacyStore, err = OpenStore(cfg.DBPath)
+		if err != nil {
+			slog.Error("store open failed", "path", cfg.DBPath, "error", err)
+			os.Exit(1)
+		}
+		defer legacyStore.Close()
+		slog.Info("legacy store ready", "path", cfg.DBPath)
 	}
-	defer legacyStore.Close()
-	slog.Info("store ready", "path", cfg.DBPath)
 	persistent, err := newPersistentApplication(cfg)
 	if err != nil {
 		slog.Error("persistent application load failed", "error", err)
@@ -50,12 +55,18 @@ func main() {
 	defer persistent.store.Close()
 
 	// 运行时配置指针：admin API copy-on-write 替换，webhook 侧原子读快照（无锁）。
-	cfgPtr := &atomic.Pointer[Config]{}
-	cfgPtr.Store(cfg)
-	gitlab := newGitlabClient(cfg)
-	admin := newAdminHandler(cfgPtr, gitlab, cfg.AdminToken,
-		getenv("SPECWIRE_ADMIN_ENV_PATH", ".env"),
-		filepath.Join(filepath.Dir(cfg.DBPath), "admin-state.json"))
+	var admin http.Handler
+	if cfg.PersistentOnly {
+		admin = http.HandlerFunc(servePersistentAdminPage)
+		slog.Info("persistent-only cutover enabled", "legacy_route_source", "disabled")
+	} else {
+		cfgPtr := &atomic.Pointer[Config]{}
+		cfgPtr.Store(cfg)
+		gitlab := newGitlabClient(cfg)
+		admin = newAdminHandler(cfgPtr, gitlab, cfg.AdminToken,
+			getenv("SPECWIRE_ADMIN_ENV_PATH", ".env"),
+			filepath.Join(filepath.Dir(cfg.DBPath), "admin-state.json"))
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/gitlab/specwire", persistent.ingress)

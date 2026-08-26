@@ -24,6 +24,8 @@ func clearEnv(t *testing.T) {
 		"SPECWIRE_REF_FILTER",
 		"SPECWIRE_CLI_TIMEOUT",
 		"SPECWIRE_LOG_LEVEL",
+		"SPECWIRE_PERSISTENT_ONLY",
+		"SPECWIRE_RETENTION_DAYS",
 	} {
 		t.Setenv(k, "")
 	}
@@ -71,6 +73,54 @@ func TestLoadConfigDefaults(t *testing.T) {
 	}
 	if cfg.LogLevel.String() != "INFO" {
 		t.Errorf("log level = %v, want INFO", cfg.LogLevel)
+	}
+	if cfg.PersistentOnly {
+		t.Error("persistent_only = true, want false")
+	}
+	if cfg.RetentionDays != 30 {
+		t.Errorf("retention days = %d, want 30", cfg.RetentionDays)
+	}
+}
+
+func TestLoadConfigPersistentOnlyDoesNotRequireLegacyEnvironment(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SPECWIRE_PERSISTENT_ONLY", "true")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.PersistentOnly {
+		t.Fatal("persistent_only = false, want true")
+	}
+	if len(cfg.AllowedProjects) != 0 || len(cfg.WebhookSecrets) != 0 || cfg.MulticaProjectID != "" {
+		t.Fatalf("legacy settings should be optional: %+v", cfg)
+	}
+}
+
+func TestLoadConfigRetentionDays(t *testing.T) {
+	clearEnv(t)
+	setRequired(t)
+	t.Setenv("SPECWIRE_RETENTION_DAYS", "45")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.RetentionDays != 45 {
+		t.Errorf("retention days = %d, want 45", cfg.RetentionDays)
+	}
+}
+
+func TestLoadConfigRejectsInvalidRetentionDays(t *testing.T) {
+	for _, value := range []string{"0", "3651", "not-a-number"} {
+		t.Run(value, func(t *testing.T) {
+			clearEnv(t)
+			setRequired(t)
+			t.Setenv("SPECWIRE_RETENTION_DAYS", value)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatal("LoadConfig: want invalid retention error, got nil")
+			}
+		})
 	}
 }
 

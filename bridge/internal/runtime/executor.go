@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,10 +18,11 @@ import (
 )
 
 const (
-	defaultJobLease      = 2 * time.Minute
-	defaultWorkerPoll    = 200 * time.Millisecond
-	defaultWorkerBackoff = 5 * time.Second
-	maxAutomaticAttempts = 5
+	defaultJobLease       = 2 * time.Minute
+	defaultWorkerPoll     = 200 * time.Millisecond
+	defaultWorkerBackoff  = 5 * time.Second
+	defaultRetentionSweep = time.Hour
+	maxAutomaticAttempts  = 5
 )
 
 // Execute runs one immutable FlowVersion.  Transformations are interpreted
@@ -108,7 +110,8 @@ func (e *Executor) ExecuteInWorkspace(ctx context.Context, workspaceID, executio
 		if existing, ok := latest[nodeID]; ok {
 			attempt = existing.Attempt + 1
 		}
-		nodeExecution := domain.NodeExecution{ID: domain.NewID(), WorkspaceID: workspaceID, ExecutionID: execution.ID, NodeID: nodeID, Status: domain.NodeRunning, Attempt: attempt, InputSnapshot: redactedMap(input)}
+		retentionUntil := e.now().UTC().Add(e.retention)
+		nodeExecution := domain.NodeExecution{ID: domain.NewID(), WorkspaceID: workspaceID, ExecutionID: execution.ID, NodeID: nodeID, Status: domain.NodeRunning, Attempt: attempt, InputSnapshot: redactedMap(input), RetentionUntil: &retentionUntil}
 		if err := e.store.CreateNodeExecution(ctx, nodeExecution); err != nil {
 			return e.failExecution(ctx, execution, "storage", err)
 		}
@@ -303,7 +306,10 @@ func (e *Executor) completeIssue(ctx context.Context, instance domain.MulticaIns
 	}
 	correlation, err := e.store.GetCorrelation(ctx, connection.WorkspaceID, connection.ID, connection.SourceGitLabProject.ExternalID, changeID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: correlated projection for %s is unavailable: %v", domain.ErrNotFound, changeID, err)
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, &reconciliationError{err: fmt.Errorf("%w: correlated projection for %s is unavailable: %v", domain.ErrNotFound, changeID, err)}
+		}
+		return nil, err
 	}
 	status := firstNonEmpty(stringValue(input["desired_status"]), "done")
 	if status != "done" {
@@ -662,13 +668,14 @@ func appendUnique(values []string, value string) []string {
 // makes a process restart safe; the per-Connection mutex keeps related work
 // ordered while allowing unrelated Connections to run concurrently.
 type Worker struct {
-	store       Store
-	executor    *Executor
-	workerID    string
-	lease       time.Duration
-	poll        time.Duration
-	concurrency int
-	locks       sync.Map
+	store          Store
+	executor       *Executor
+	workerID       string
+	lease          time.Duration
+	poll           time.Duration
+	concurrency    int
+	retentionSweep time.Duration
+	locks          sync.Map
 }
 
 type WorkerOption func(*Worker)
@@ -697,11 +704,19 @@ func WithWorkerConcurrency(value int) WorkerOption {
 	}
 }
 
+func WithWorkerRetentionSweep(value time.Duration) WorkerOption {
+	return func(w *Worker) {
+		if value > 0 {
+			w.retentionSweep = value
+		}
+	}
+}
+
 func NewWorker(store Store, executor *Executor, workerID string, options ...WorkerOption) (*Worker, error) {
 	if store == nil || executor == nil || strings.TrimSpace(workerID) == "" {
 		return nil, invalid("worker dependencies and worker ID are required")
 	}
-	worker := &Worker{store: store, executor: executor, workerID: workerID, lease: defaultJobLease, poll: defaultWorkerPoll, concurrency: 2}
+	worker := &Worker{store: store, executor: executor, workerID: workerID, lease: defaultJobLease, poll: defaultWorkerPoll, concurrency: 2, retentionSweep: defaultRetentionSweep}
 	for _, option := range options {
 		option(worker)
 	}
@@ -713,11 +728,23 @@ func (w *Worker) Run(ctx context.Context) error {
 	var wait sync.WaitGroup
 	ticker := time.NewTicker(w.poll)
 	defer ticker.Stop()
+	retentionTicker := time.NewTicker(w.retentionSweep)
+	defer retentionTicker.Stop()
 	defer wait.Wait()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-retentionTicker.C:
+			if retention, ok := w.store.(RetentionStore); ok {
+				if cleared, err := retention.PurgeExpiredRuntimePayloads(ctx, time.Now().UTC()); err != nil {
+					// Retention is hygiene, not a reason to stop delivery. The
+					// next sweep can retry after a transient database failure.
+					slog.Warn("runtime retention sweep failed", "error", err)
+				} else if cleared > 0 {
+					slog.Info("runtime retention sweep cleared snapshots", "count", cleared)
+				}
+			}
 		case <-ticker.C:
 			select {
 			case semaphore <- struct{}{}:

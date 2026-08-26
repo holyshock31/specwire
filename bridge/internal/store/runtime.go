@@ -83,6 +83,7 @@ func (s *Store) AcceptInboundEvent(ctx context.Context, event domain.InboundEven
 		sum := sha256.Sum256([]byte(payload))
 		event.PayloadHash = hex.EncodeToString(sum[:])
 	}
+	retentionUntil := formatOptionalTime(event.RetentionUntil)
 	providerIDs, err := marshalJSON(execution.ProviderRequestIDs, "[]")
 	if err != nil {
 		return domain.FlowExecution{}, false, err
@@ -97,11 +98,11 @@ func (s *Store) AcceptInboundEvent(ctx context.Context, event domain.InboundEven
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO inbound_events
-		(id, workspace_id, connection_id, provider, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id, payload_json, payload_hash, received_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, workspace_id, connection_id, provider, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id, payload_json, payload_hash, received_at, retention_until)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(workspace_id, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id) DO NOTHING`,
 		event.ID, event.WorkspaceID, event.ConnectionID, event.Provider, event.SourceInstanceID, event.SourceProjectExternalID,
-		event.BehaviorKey, event.BehaviorVersion, event.DeliveryID, payload, event.PayloadHash, event.ReceivedAt.Format(time.RFC3339Nano)); err != nil {
+		event.BehaviorKey, event.BehaviorVersion, event.DeliveryID, payload, event.PayloadHash, event.ReceivedAt.Format(time.RFC3339Nano), retentionUntil); err != nil {
 		return domain.FlowExecution{}, false, constraintError("accept inbound event", err)
 	}
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM inbound_events WHERE workspace_id = ? AND source_instance_id = ? AND source_project_external_id = ? AND behavior_key = ? AND behavior_version = ? AND delivery_id = ?`, event.WorkspaceID, event.SourceInstanceID, event.SourceProjectExternalID, event.BehaviorKey, event.BehaviorVersion, event.DeliveryID).Scan(&event.ID); err != nil {
@@ -165,10 +166,10 @@ func (s *Store) SaveInboundEvent(ctx context.Context, event domain.InboundEvent)
 		event.PayloadHash = hex.EncodeToString(sum[:])
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO inbound_events
-		(id, workspace_id, connection_id, provider, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id, payload_json, payload_hash, received_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, workspace_id, connection_id, provider, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id, payload_json, payload_hash, received_at, retention_until)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(workspace_id, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id) DO NOTHING`,
-		event.ID, event.WorkspaceID, event.ConnectionID, event.Provider, event.SourceInstanceID, event.SourceProjectExternalID, event.BehaviorKey, event.BehaviorVersion, event.DeliveryID, payload, event.PayloadHash, event.ReceivedAt.Format(time.RFC3339Nano))
+		event.ID, event.WorkspaceID, event.ConnectionID, event.Provider, event.SourceInstanceID, event.SourceProjectExternalID, event.BehaviorKey, event.BehaviorVersion, event.DeliveryID, payload, event.PayloadHash, event.ReceivedAt.Format(time.RFC3339Nano), formatOptionalTime(event.RetentionUntil))
 	if err != nil {
 		return domain.InboundEvent{}, constraintError("save inbound event", err)
 	}
@@ -178,9 +179,10 @@ func (s *Store) SaveInboundEvent(ctx context.Context, event domain.InboundEvent)
 func (s *Store) GetInboundEvent(ctx context.Context, workspaceID, eventID domain.ID) (domain.InboundEvent, error) {
 	var event domain.InboundEvent
 	var payload, received string
-	err := s.db.QueryRowContext(ctx, `SELECT id, connection_id, provider, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id, payload_json, payload_hash, received_at
+	var retention sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT id, connection_id, provider, source_instance_id, source_project_external_id, behavior_key, behavior_version, delivery_id, payload_json, payload_hash, received_at, retention_until
 		FROM inbound_events WHERE workspace_id = ? AND id = ?`, workspaceID, eventID).Scan(
-		&event.ID, &event.ConnectionID, &event.Provider, &event.SourceInstanceID, &event.SourceProjectExternalID, &event.BehaviorKey, &event.BehaviorVersion, &event.DeliveryID, &payload, &event.PayloadHash, &received)
+		&event.ID, &event.ConnectionID, &event.Provider, &event.SourceInstanceID, &event.SourceProjectExternalID, &event.BehaviorKey, &event.BehaviorVersion, &event.DeliveryID, &payload, &event.PayloadHash, &received, &retention)
 	if err == sql.ErrNoRows {
 		return domain.InboundEvent{}, fmt.Errorf("%w: inbound event %s", domain.ErrNotFound, eventID)
 	}
@@ -192,6 +194,10 @@ func (s *Store) GetInboundEvent(ctx context.Context, workspaceID, eventID domain
 		return domain.InboundEvent{}, fmt.Errorf("decode inbound event: %w", err)
 	}
 	event.ReceivedAt, err = decodeTime(received)
+	if err != nil {
+		return domain.InboundEvent{}, err
+	}
+	event.RetentionUntil, err = decodeOptionalTime(retention)
 	if err != nil {
 		return domain.InboundEvent{}, err
 	}
@@ -356,8 +362,8 @@ func (s *Store) CreateNodeExecution(ctx context.Context, node domain.NodeExecuti
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO node_executions
-		(id, workspace_id, execution_id, node_id, status, attempt, input_snapshot_json, output_snapshot_json, error_category, error_message, provider_request_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.ID, node.WorkspaceID, node.ExecutionID, node.NodeID, node.Status, node.Attempt, input, output, node.ErrorCategory, truncateMessage(node.ErrorMessage), node.ProviderRequestID)
+		(id, workspace_id, execution_id, node_id, status, attempt, input_snapshot_json, output_snapshot_json, error_category, error_message, provider_request_id, retention_until)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.ID, node.WorkspaceID, node.ExecutionID, node.NodeID, node.Status, node.Attempt, input, output, node.ErrorCategory, truncateMessage(node.ErrorMessage), node.ProviderRequestID, formatOptionalTime(node.RetentionUntil))
 	return constraintError("create NodeExecution", err)
 }
 
@@ -370,7 +376,7 @@ func (s *Store) UpdateNodeExecution(ctx context.Context, node domain.NodeExecuti
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE node_executions SET status = ?, input_snapshot_json = ?, output_snapshot_json = ?, error_category = ?, error_message = ?, provider_request_id = ? WHERE workspace_id = ? AND id = ?`, node.Status, input, output, node.ErrorCategory, truncateMessage(node.ErrorMessage), node.ProviderRequestID, node.WorkspaceID, node.ID)
+	result, err := s.db.ExecContext(ctx, `UPDATE node_executions SET status = ?, input_snapshot_json = ?, output_snapshot_json = ?, error_category = ?, error_message = ?, provider_request_id = ?, retention_until = ? WHERE workspace_id = ? AND id = ?`, node.Status, input, output, node.ErrorCategory, truncateMessage(node.ErrorMessage), node.ProviderRequestID, formatOptionalTime(node.RetentionUntil), node.WorkspaceID, node.ID)
 	if err != nil {
 		return err
 	}
@@ -383,7 +389,7 @@ func (s *Store) UpdateNodeExecution(ctx context.Context, node domain.NodeExecuti
 }
 
 func (s *Store) ListNodeExecutions(ctx context.Context, workspaceID, executionID domain.ID) ([]domain.NodeExecution, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, status, attempt, input_snapshot_json, output_snapshot_json, error_category, error_message, provider_request_id FROM node_executions WHERE workspace_id = ? AND execution_id = ? ORDER BY attempt, node_id`, workspaceID, executionID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, status, attempt, input_snapshot_json, output_snapshot_json, error_category, error_message, provider_request_id, retention_until FROM node_executions WHERE workspace_id = ? AND execution_id = ? ORDER BY attempt, node_id`, workspaceID, executionID)
 	if err != nil {
 		return nil, err
 	}
@@ -392,7 +398,8 @@ func (s *Store) ListNodeExecutions(ctx context.Context, workspaceID, executionID
 	for rows.Next() {
 		var item domain.NodeExecution
 		var input, output string
-		if err := rows.Scan(&item.ID, &item.NodeID, &item.Status, &item.Attempt, &input, &output, &item.ErrorCategory, &item.ErrorMessage, &item.ProviderRequestID); err != nil {
+		var retention sql.NullString
+		if err := rows.Scan(&item.ID, &item.NodeID, &item.Status, &item.Attempt, &input, &output, &item.ErrorCategory, &item.ErrorMessage, &item.ProviderRequestID, &retention); err != nil {
 			return nil, err
 		}
 		item.WorkspaceID, item.ExecutionID = workspaceID, executionID
@@ -400,6 +407,10 @@ func (s *Store) ListNodeExecutions(ctx context.Context, workspaceID, executionID
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(output), &item.OutputSnapshot); err != nil {
+			return nil, err
+		}
+		item.RetentionUntil, err = decodeOptionalTime(retention)
+		if err != nil {
 			return nil, err
 		}
 		result = append(result, item)
