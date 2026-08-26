@@ -20,7 +20,7 @@ type HookStore interface {
 	GetGitLabInstance(context.Context, domain.ID, domain.ID) (domain.GitLabInstance, error)
 	GetHookByProject(context.Context, domain.ID, domain.ID, string) (domain.Hook, error)
 	UpsertHook(context.Context, domain.Hook) (domain.Hook, error)
-	UpsertHookRoute(context.Context, domain.HookRoute) (domain.HookRoute, error)
+	ActivateHookRoute(context.Context, domain.HookRoute) (domain.HookRoute, error)
 	DisableHookRoutesForFlow(context.Context, domain.ID, domain.ID, int) error
 	EnsureManagedResource(context.Context, domain.ManagedResource) (domain.ManagedResource, error)
 }
@@ -78,7 +78,7 @@ func (r *HookReconciler) ActivateInputFlow(ctx context.Context, version domain.F
 	if err != nil {
 		return err
 	}
-	route, err := r.store.UpsertHookRoute(ctx, domain.HookRoute{
+	route, err := r.store.ActivateHookRoute(ctx, domain.HookRoute{
 		ID:              domain.NewID(),
 		WorkspaceID:     version.WorkspaceID,
 		ConnectionID:    connection.ID,

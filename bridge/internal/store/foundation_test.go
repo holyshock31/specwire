@@ -125,6 +125,48 @@ func TestMulticaProjectURLSnapshotRoundTrips(t *testing.T) {
 	}
 }
 
+func TestActivateHookRouteRetiresPreviousFlowVersion(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	workspace := testWorkspace(t, s, "workspace-route-version")
+	testEndpoints(t, s, workspace.ID, "gitlab-route-version", "multica-route-version", "route")
+	connection := testConnection(workspace.ID, "connection-route-version", "gitlab-route-version", "multica-route-version", "source-route", "target-route")
+	if err := s.CreateConnection(ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertHook(ctx, domain.Hook{
+		ID: "hook-route-version", WorkspaceID: workspace.ID, ConnectionID: connection.ID, Provider: domain.ProviderGitLab,
+		InstanceID: "gitlab-route-version", SourceProjectExternalID: "source-route", ExternalID: "provider-hook-route-version", Status: domain.HookActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for version := 1; version <= 2; version++ {
+		if _, err := s.ActivateHookRoute(ctx, domain.HookRoute{
+			ID: domain.ID(fmt.Sprintf("route-version-%d", version)), WorkspaceID: workspace.ID, ConnectionID: connection.ID,
+			SourceProject: connection.SourceGitLabProject, BehaviorKey: "gitlab.issue-hook", BehaviorVersion: "1.0.0",
+			FlowID: "flow-route-version", FlowVersion: version, HookRef: "hook-route-version", Status: domain.HookActive,
+		}); err != nil {
+			t.Fatalf("activate route v%d: %v", version, err)
+		}
+	}
+	routes, err := s.ListHookRoutes(ctx, workspace.ID, connection.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("routes = %d, want 2", len(routes))
+	}
+	for _, route := range routes {
+		want := domain.HookDisabled
+		if route.FlowVersion == 2 {
+			want = domain.HookActive
+		}
+		if route.Status != want {
+			t.Fatalf("route v%d status = %q, want %q", route.FlowVersion, route.Status, want)
+		}
+	}
+}
+
 func TestRegistryBootstrapIsIdempotentAndImmutable(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

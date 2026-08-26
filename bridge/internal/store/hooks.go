@@ -94,6 +94,47 @@ func (s *Store) GetHookByProject(ctx context.Context, workspaceID, instanceID do
 }
 
 func (s *Store) UpsertHookRoute(ctx context.Context, route domain.HookRoute) (domain.HookRoute, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.HookRoute{}, fmt.Errorf("begin upsert Hook route: %w", err)
+	}
+	defer tx.Rollback()
+	stored, err := upsertHookRouteTx(ctx, tx, route)
+	if err != nil {
+		return domain.HookRoute{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.HookRoute{}, fmt.Errorf("commit upsert Hook route: %w", err)
+	}
+	return stored, nil
+}
+
+// ActivateHookRoute persists the selected version and retires older routes
+// for the same Flow in one transaction.  Provider reconciliation happens
+// before this call, so a successful commit leaves exactly one active version
+// for a Flow even when the Flow is republished concurrently.
+func (s *Store) ActivateHookRoute(ctx context.Context, route domain.HookRoute) (domain.HookRoute, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.HookRoute{}, fmt.Errorf("begin activate Hook route: %w", err)
+	}
+	defer tx.Rollback()
+	stored, err := upsertHookRouteTx(ctx, tx, route)
+	if err != nil {
+		return domain.HookRoute{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE hook_routes SET status = 'disabled'
+		WHERE workspace_id = ? AND flow_id = ? AND flow_version <> ? AND status <> 'disabled'`,
+		stored.WorkspaceID, stored.FlowID, stored.FlowVersion); err != nil {
+		return domain.HookRoute{}, fmt.Errorf("disable older Hook routes: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.HookRoute{}, fmt.Errorf("commit activate Hook route: %w", err)
+	}
+	return stored, nil
+}
+
+func upsertHookRouteTx(ctx context.Context, tx *sql.Tx, route domain.HookRoute) (domain.HookRoute, error) {
 	if route.ID.Empty() {
 		route.ID = domain.NewID()
 	}
@@ -111,9 +152,9 @@ func (s *Store) UpsertHookRoute(ctx context.Context, route domain.HookRoute) (do
 		return domain.HookRoute{}, err
 	}
 	var existingID string
-	err = s.db.QueryRowContext(ctx, `SELECT id FROM hook_routes WHERE workspace_id = ? AND connection_id = ? AND behavior_key = ? AND behavior_version = ? AND flow_id = ? AND flow_version = ?`, route.WorkspaceID, route.ConnectionID, route.BehaviorKey, route.BehaviorVersion, route.FlowID, route.FlowVersion).Scan(&existingID)
+	err = tx.QueryRowContext(ctx, `SELECT id FROM hook_routes WHERE workspace_id = ? AND connection_id = ? AND behavior_key = ? AND behavior_version = ? AND flow_id = ? AND flow_version = ?`, route.WorkspaceID, route.ConnectionID, route.BehaviorKey, route.BehaviorVersion, route.FlowID, route.FlowVersion).Scan(&existingID)
 	if err == nil {
-		_, err = s.db.ExecContext(ctx, `UPDATE hook_routes SET source_instance_id = ?, source_project_external_id = ?, event_filter_json = ?, hook_id = ?, status = ? WHERE id = ? AND workspace_id = ?`, route.SourceProject.InstanceID, route.SourceProject.ExternalID, filter, route.HookRef, route.Status, existingID, route.WorkspaceID)
+		_, err = tx.ExecContext(ctx, `UPDATE hook_routes SET source_instance_id = ?, source_project_external_id = ?, event_filter_json = ?, hook_id = ?, status = ? WHERE id = ? AND workspace_id = ?`, route.SourceProject.InstanceID, route.SourceProject.ExternalID, filter, route.HookRef, route.Status, existingID, route.WorkspaceID)
 		if err != nil {
 			return domain.HookRoute{}, constraintError("update Hook route", err)
 		}
@@ -123,7 +164,7 @@ func (s *Store) UpsertHookRoute(ctx context.Context, route domain.HookRoute) (do
 	if err != sql.ErrNoRows {
 		return domain.HookRoute{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO hook_routes
+	_, err = tx.ExecContext(ctx, `INSERT INTO hook_routes
 		(id, workspace_id, connection_id, source_instance_id, source_project_external_id, behavior_key, behavior_version, flow_id, flow_version, event_filter_json, hook_id, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, route.ID, route.WorkspaceID, route.ConnectionID, route.SourceProject.InstanceID, route.SourceProject.ExternalID, route.BehaviorKey, route.BehaviorVersion, route.FlowID, route.FlowVersion, filter, route.HookRef, route.Status)
 	if err != nil {
