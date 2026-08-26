@@ -1198,6 +1198,8 @@ func (s *Server) handleExecutions(w http.ResponseWriter, r *http.Request, sessio
 	switch parts[3] {
 	case "retry":
 		s.retryExecution(w, r, session, store, execution)
+	case "repair":
+		s.repairExecution(w, r, session, store, execution)
 	case "replay":
 		s.replayExecution(w, r, session, store, execution)
 	default:
@@ -1245,6 +1247,33 @@ func (s *Server) retryExecution(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	s.audit(r.Context(), session.AccountID, "execution.retry", "flow_execution", execution.ID, map[string]any{"workspace_id": execution.WorkspaceID, "job_id": job.ID})
+	writeJSON(w, http.StatusAccepted, execution)
+}
+
+func (s *Server) repairExecution(w http.ResponseWriter, r *http.Request, session domain.Session, store IntegrationStore, execution domain.FlowExecution) {
+	if r.Method != http.MethodPost || !s.checkCSRF(w, r, session) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+		}
+		return
+	}
+	if execution.Status != domain.ExecutionIndeterminate && execution.Status != domain.ExecutionReconciliationNeeded {
+		writeError(w, fmt.Errorf("%w: only indeterminate or reconciliation-required executions can be repaired", domain.ErrConflict))
+		return
+	}
+	// Repair is deliberately a separate operator action from ordinary retry.
+	// The worker still resumes the immutable execution and the provider adapters
+	// retain their correlation/idempotency guards; this endpoint never creates a
+	// new FlowVersion or accepts arbitrary provider parameters.
+	execution.Status = domain.ExecutionQueued
+	execution.ErrorCategory = ""
+	execution.ErrorMessage = ""
+	job := domain.Job{ID: domain.NewID(), WorkspaceID: execution.WorkspaceID, Kind: "flow.repair", Payload: map[string]any{"execution_id": execution.ID, "connection_id": execution.ConnectionID}}
+	if err := store.RequeueFlowExecution(r.Context(), execution, job); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r.Context(), session.AccountID, "execution.repair", "flow_execution", execution.ID, map[string]any{"workspace_id": execution.WorkspaceID, "job_id": job.ID, "provider_reconciliation": true})
 	writeJSON(w, http.StatusAccepted, execution)
 }
 

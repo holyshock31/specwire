@@ -169,6 +169,22 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	if status != http.StatusAccepted || !strings.Contains(body, `"side_effects_confirmed":true`) || !strings.Contains(body, `"live-test:`) {
 		t.Fatalf("live test = %d %s", status, body)
 	}
+	var liveTest struct {
+		Execution domain.FlowExecution `json:"execution"`
+	}
+	if err := json.Unmarshal([]byte(body), &liveTest); err != nil {
+		t.Fatal(err)
+	}
+	liveTest.Execution.Status = domain.ExecutionReconciliationNeeded
+	liveTest.Execution.ErrorCategory = "reconciliation-required"
+	liveTest.Execution.ErrorMessage = "provider outcome needs reconciliation"
+	if err := db.UpdateFlowExecution(context.Background(), liveTest.Execution); err != nil {
+		t.Fatal(err)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/executions/"+string(liveTest.Execution.ID)+"/repair", `{}`, csrf)
+	if status != http.StatusAccepted || !strings.Contains(body, `"status":"queued"`) {
+		t.Fatalf("repair execution = %d %s", status, body)
+	}
 	status, body = jsonRequest(t, client, http.MethodGet, base+"/flows/"+string(created.ID)+"/versions", "", nil)
 	if status != http.StatusOK || !strings.Contains(body, `"version":1`) {
 		t.Fatalf("list Flow versions = %d %s", status, body)
