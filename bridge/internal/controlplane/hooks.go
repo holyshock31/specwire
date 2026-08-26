@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"specwire/bridge/internal/domain"
@@ -100,7 +101,7 @@ func (r *HookReconciler) ActivateInputFlow(ctx context.Context, version domain.F
 		Ownership:      domain.OwnershipManaged,
 		ManagementMark: "specwire-managed",
 		Status:         string(route.Status),
-		Snapshot:       map[string]any{"url": r.hookURL, "route_id": route.ID, "flow_version": version.Version},
+		Snapshot:       map[string]any{"url": r.hookURLForInstance(connection.SourceGitLabProject.InstanceID), "route_id": route.ID, "flow_version": version.Version},
 	})
 	return err
 }
@@ -162,12 +163,12 @@ func (r *HookReconciler) ensureHook(ctx context.Context, connection domain.Conne
 	defer clearBytes(signingToken)
 	project := connection.SourceGitLabProject
 	providerProject := provider.GitLabProject{InstanceID: project.InstanceID, ExternalID: project.ExternalID, FullPath: project.FullPath, Name: project.Name, WebURL: project.WebURL, SSHURL: project.SSHURL, HTTPSURL: project.HTTPSURL}
-	gitlabCredential, cleanup, err := r.resolveGitLabCredential(ctx)
+	gitlabCredential, cleanup, err := r.resolveGitLabCredential(ctx, connection)
 	if err != nil {
 		return domain.Hook{}, err
 	}
 	defer cleanup()
-	hookResult, err := r.gitlab.EnsureHook(ctx, gitlabInstance, providerProject, provider.HookSpec{URL: r.hookURL, Events: eventsForBehavior(behavior, input), SigningRef: signingRef, SigningToken: signingToken, ManagementMark: "specwire-managed"}, gitlabCredential)
+	hookResult, err := r.gitlab.EnsureHook(ctx, gitlabInstance, providerProject, provider.HookSpec{URL: r.hookURLForInstance(project.InstanceID), Events: eventsForBehavior(behavior, input), SigningRef: signingRef, SigningToken: signingToken, ManagementMark: "specwire-managed"}, gitlabCredential)
 	if err != nil {
 		return domain.Hook{}, err
 	}
@@ -178,18 +179,42 @@ func (r *HookReconciler) ensureHook(ctx context.Context, connection domain.Conne
 	return r.store.UpsertHook(ctx, domain.Hook{ID: hook.ID, WorkspaceID: connection.WorkspaceID, ConnectionID: connection.ID, Provider: domain.ProviderGitLab, InstanceID: project.InstanceID, SourceProjectExternalID: project.ExternalID, ExternalID: hookID, SigningRef: &signingRef, Status: domain.HookActive})
 }
 
-func (r *HookReconciler) resolveGitLabCredential(ctx context.Context) (*provider.Credential, func(), error) {
-	if r.gitlabCredRef == nil {
+func (r *HookReconciler) resolveGitLabCredential(ctx context.Context, connection domain.Connection) (*provider.Credential, func(), error) {
+	ref := r.gitlabCredRef
+	if ref == nil && connection.SourceGitLabProject.GroupID != "" {
+		if groupStore, ok := r.store.(interface {
+			GetGitLabGroupBindingByGroup(context.Context, domain.ID, domain.ID, string) (domain.GitLabGroupBinding, error)
+		}); ok {
+			binding, err := groupStore.GetGitLabGroupBindingByGroup(ctx, connection.WorkspaceID, connection.SourceGitLabProject.InstanceID, connection.SourceGitLabProject.GroupID)
+			if err == nil {
+				ref = binding.CredentialRef
+			} else if !errors.Is(err, domain.ErrNotFound) {
+				return nil, func() {}, err
+			}
+		}
+	}
+	if ref == nil {
 		return nil, func() {}, nil
 	}
 	if r.vault == nil {
 		return nil, func() {}, fmt.Errorf("%w: GitLab credential resolver is not configured", domain.ErrInvalid)
 	}
-	material, err := r.vault.Resolve(ctx, *r.gitlabCredRef)
+	material, err := r.vault.Resolve(ctx, *ref)
 	if err != nil {
 		return nil, func() {}, err
 	}
-	return &provider.Credential{Ref: *r.gitlabCredRef, Material: material}, func() { clearBytes(material) }, nil
+	return &provider.Credential{Ref: *ref, Material: material}, func() { clearBytes(material) }, nil
+}
+
+func (r *HookReconciler) hookURLForInstance(instanceID domain.ID) string {
+	parsed, err := url.Parse(r.hookURL)
+	if err != nil {
+		return r.hookURL
+	}
+	query := parsed.Query()
+	query.Set("instance_id", string(instanceID))
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 func eventsForBehavior(behavior domain.ConnectorBehavior, node domain.FlowNode) []string {

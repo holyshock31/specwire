@@ -171,6 +171,35 @@ func (s *Store) RegistryCounts(ctx context.Context, workspaceID domain.ID) (Regi
 	return counts, nil
 }
 
+func (s *Store) ListConnectorTypes(ctx context.Context, workspaceID domain.ID) ([]domain.ConnectorType, error) {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, definition_json FROM connector_types
+		WHERE workspace_id = ? ORDER BY key, version`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list connector types: %w", err)
+	}
+	defer rows.Close()
+	var out []domain.ConnectorType
+	for rows.Next() {
+		var id, definition string
+		if err := rows.Scan(&id, &definition); err != nil {
+			return nil, fmt.Errorf("scan connector type: %w", err)
+		}
+		var item domain.ConnectorType
+		if err := json.Unmarshal([]byte(definition), &item); err != nil {
+			return nil, fmt.Errorf("decode connector type: %w", err)
+		}
+		item.ID, item.WorkspaceID = domain.ID(id), workspaceID
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list connector types: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) ListConnectorBehaviors(ctx context.Context, workspaceID domain.ID) ([]domain.ConnectorBehavior, error) {
 	if err := requireWorkspaceID(workspaceID); err != nil {
 		return nil, err

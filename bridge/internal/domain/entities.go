@@ -574,6 +574,7 @@ type Correlation struct {
 	ConnectionID        ID        `json:"connection_id"`
 	SourceIdentity      string    `json:"source_identity"`
 	SourceIssueIID      int       `json:"source_issue_iid,omitempty"`
+	SourceIssueIIDs     []int     `json:"source_issue_iids,omitempty"`
 	PublicationIdentity string    `json:"publication_identity"`
 	TargetIdentity      string    `json:"target_identity,omitempty"`
 	FlowExecutionID     ID        `json:"flow_execution_id,omitempty"`

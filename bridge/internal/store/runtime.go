@@ -53,6 +53,9 @@ func (s *Store) AcceptInboundEvent(ctx context.Context, event domain.InboundEven
 	if strings.TrimSpace(job.Kind) == "" {
 		job.Kind = "flow.execute"
 	}
+	if strings.TrimSpace(job.Status) == "" {
+		job.Status = "queued"
+	}
 	now := s.now().UTC()
 	if event.ReceivedAt.IsZero() {
 		event.ReceivedAt = now
@@ -548,10 +551,21 @@ func (s *Store) UpsertCorrelation(ctx context.Context, correlation domain.Correl
 	if correlation.CreatedAt.IsZero() {
 		correlation.CreatedAt = s.now()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO correlations
-		(id, workspace_id, connection_id, source_identity, source_issue_iid, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(workspace_id, connection_id, source_identity, publication_identity) DO UPDATE SET source_issue_iid = excluded.source_issue_iid, target_identity = excluded.target_identity, flow_execution_id = excluded.flow_execution_id, provider_request_id = excluded.provider_request_id`, correlation.ID, correlation.WorkspaceID, correlation.ConnectionID, correlation.SourceIdentity, correlation.SourceIssueIID, correlation.PublicationIdentity, correlation.TargetIdentity, nullID(correlation.FlowExecutionID), correlation.ProviderRequestID, correlation.CreatedAt.Format(time.RFC3339Nano))
+	issueIIDs := normalizeIssueIIDs(correlation.SourceIssueIIDs)
+	if len(issueIIDs) == 0 && correlation.SourceIssueIID > 0 {
+		issueIIDs = []int{correlation.SourceIssueIID}
+	}
+	if len(issueIIDs) > 0 && correlation.SourceIssueIID == 0 {
+		correlation.SourceIssueIID = issueIIDs[0]
+	}
+	issueIIDsJSON, err := json.Marshal(issueIIDs)
+	if err != nil {
+		return domain.Correlation{}, fmt.Errorf("marshal correlation source issues: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO correlations
+		(id, workspace_id, connection_id, source_identity, source_issue_iid, source_issue_iids_json, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, connection_id, source_identity, publication_identity) DO UPDATE SET source_issue_iid = excluded.source_issue_iid, source_issue_iids_json = excluded.source_issue_iids_json, target_identity = excluded.target_identity, flow_execution_id = excluded.flow_execution_id, provider_request_id = excluded.provider_request_id`, correlation.ID, correlation.WorkspaceID, correlation.ConnectionID, correlation.SourceIdentity, correlation.SourceIssueIID, string(issueIIDsJSON), correlation.PublicationIdentity, correlation.TargetIdentity, nullID(correlation.FlowExecutionID), correlation.ProviderRequestID, correlation.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return domain.Correlation{}, constraintError("upsert correlation", err)
 	}
@@ -561,13 +575,26 @@ func (s *Store) UpsertCorrelation(ctx context.Context, correlation domain.Correl
 func (s *Store) GetCorrelation(ctx context.Context, workspaceID, connectionID domain.ID, sourceIdentity, publicationIdentity string) (domain.Correlation, error) {
 	var item domain.Correlation
 	var flowExecution sql.NullString
+	var issueIIDsJSON string
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id, source_identity, source_issue_iid, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at FROM correlations WHERE workspace_id = ? AND connection_id = ? AND source_identity = ? AND publication_identity = ?`, workspaceID, connectionID, sourceIdentity, publicationIdentity).Scan(&item.ID, &item.SourceIdentity, &item.SourceIssueIID, &item.PublicationIdentity, &item.TargetIdentity, &flowExecution, &item.ProviderRequestID, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id, source_identity, source_issue_iid, source_issue_iids_json, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at FROM correlations WHERE workspace_id = ? AND connection_id = ? AND source_identity = ? AND publication_identity = ?`, workspaceID, connectionID, sourceIdentity, publicationIdentity).Scan(&item.ID, &item.SourceIdentity, &item.SourceIssueIID, &issueIIDsJSON, &item.PublicationIdentity, &item.TargetIdentity, &flowExecution, &item.ProviderRequestID, &created)
 	if err == sql.ErrNoRows {
 		return domain.Correlation{}, fmt.Errorf("%w: correlation %s", domain.ErrNotFound, publicationIdentity)
 	}
 	if err != nil {
 		return domain.Correlation{}, err
+	}
+	if strings.TrimSpace(issueIIDsJSON) != "" {
+		if err := json.Unmarshal([]byte(issueIIDsJSON), &item.SourceIssueIIDs); err != nil {
+			return domain.Correlation{}, fmt.Errorf("decode correlation source issues: %w", err)
+		}
+	}
+	item.SourceIssueIIDs = normalizeIssueIIDs(item.SourceIssueIIDs)
+	if len(item.SourceIssueIIDs) == 0 && item.SourceIssueIID > 0 {
+		item.SourceIssueIIDs = []int{item.SourceIssueIID}
+	}
+	if item.SourceIssueIID == 0 && len(item.SourceIssueIIDs) > 0 {
+		item.SourceIssueIID = item.SourceIssueIIDs[0]
 	}
 	item.WorkspaceID, item.ConnectionID = workspaceID, connectionID
 	if flowExecution.Valid {
@@ -575,6 +602,25 @@ func (s *Store) GetCorrelation(ctx context.Context, workspaceID, connectionID do
 	}
 	item.CreatedAt, err = decodeTime(created)
 	return item, err
+}
+
+func normalizeIssueIIDs(values []int) []int {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]int, 0, len(values))
+	seen := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (s *Store) ListActiveHookRoutesForEvent(ctx context.Context, workspaceID, sourceInstanceID domain.ID, sourceProject, behaviorKey, behaviorVersion string) ([]domain.HookRoute, error) {

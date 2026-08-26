@@ -13,6 +13,7 @@ import (
 
 type Store interface {
 	CreateFlow(context.Context, domain.Flow) error
+	GetFlow(context.Context, domain.ID, domain.ID) (domain.Flow, error)
 	SaveFlowDraft(context.Context, domain.ID, domain.ID, domain.FlowGraph) error
 	GetFlowDraft(context.Context, domain.ID, domain.ID) (domain.FlowGraph, error)
 	SaveFlowVersion(context.Context, domain.FlowVersion) error
@@ -145,6 +146,19 @@ func (s *Service) Pause(ctx context.Context, workspaceID, flowID domain.ID, acti
 }
 
 func (s *Service) Archive(ctx context.Context, workspaceID, flowID domain.ID) error {
+	flowRecord, err := s.store.GetFlow(ctx, workspaceID, flowID)
+	if err != nil {
+		return err
+	}
+	if s.routes != nil && flowRecord.ActiveVersion > 0 {
+		version, err := s.store.GetFlowVersion(ctx, workspaceID, flowID, flowRecord.ActiveVersion)
+		if err != nil {
+			return err
+		}
+		if err := s.routes.PauseInputFlow(ctx, version); err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+	}
 	return s.store.UpdateFlowStatus(ctx, workspaceID, flowID, domain.FlowArchived)
 }
 

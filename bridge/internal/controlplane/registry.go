@@ -12,6 +12,7 @@ type RegistryStore interface {
 	RegisterConnectorType(context.Context, domain.ID, domain.ConnectorType) error
 	RegisterConnectorBehavior(context.Context, domain.ID, domain.ConnectorBehavior) error
 	RegisterDataModel(context.Context, domain.ID, domain.DataModelDefinition) error
+	ListConnectorTypes(context.Context, domain.ID) ([]domain.ConnectorType, error)
 	ListConnectorBehaviors(context.Context, domain.ID) ([]domain.ConnectorBehavior, error)
 	ListDataModels(context.Context, domain.ID) ([]domain.DataModelDefinition, error)
 }
@@ -44,4 +45,16 @@ func (s *RegistryService) RegisterConnectorBehavior(ctx context.Context, workspa
 func (s *RegistryService) RegisterDataModel(ctx context.Context, workspaceID domain.ID, item domain.DataModelDefinition) error {
 	item.WorkspaceID = workspaceID
 	return s.store.RegisterDataModel(ctx, workspaceID, item)
+}
+
+func (s *RegistryService) ListConnectorTypes(ctx context.Context, workspaceID domain.ID) ([]domain.ConnectorType, error) {
+	return s.store.ListConnectorTypes(ctx, workspaceID)
+}
+
+func (s *RegistryService) ListConnectorBehaviors(ctx context.Context, workspaceID domain.ID) ([]domain.ConnectorBehavior, error) {
+	return s.store.ListConnectorBehaviors(ctx, workspaceID)
+}
+
+func (s *RegistryService) ListDataModels(ctx context.Context, workspaceID domain.ID) ([]domain.DataModelDefinition, error) {
+	return s.store.ListDataModels(ctx, workspaceID)
 }

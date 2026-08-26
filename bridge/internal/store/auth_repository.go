@@ -125,10 +125,18 @@ func (s *Store) BootstrapFirstAdmin(ctx context.Context, account domain.Account,
 	if _, err := tx.ExecContext(ctx, `INSERT INTO account_password_credentials(account_id, password_hash, updated_at) VALUES (?, ?, ?)`, account.ID, passwordHash, nowText()); err != nil {
 		return constraintError("bootstrap password", err)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO workspaces
-		(id, slug, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, workspace.ID,
-		workspace.Slug, workspace.Name, workspace.Status, workspace.CreatedAt.Format(time.RFC3339Nano), workspace.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
-		return constraintError("bootstrap workspace", err)
+	var existingWorkspaceID string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM workspaces WHERE slug = ?`, workspace.Slug).Scan(&existingWorkspaceID)
+	if err == sql.ErrNoRows {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workspaces
+			(id, slug, name, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, workspace.ID,
+			workspace.Slug, workspace.Name, workspace.Status, workspace.CreatedAt.Format(time.RFC3339Nano), workspace.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
+			return constraintError("bootstrap workspace", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("find bootstrap workspace: %w", err)
+	} else {
+		workspace.ID = domain.ID(existingWorkspaceID)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO workspace_memberships
 		(id, workspace_id, account_id, status, created_at) VALUES (?, ?, ?, 'active', ?)`, membershipID, workspace.ID, account.ID, nowText()); err != nil {

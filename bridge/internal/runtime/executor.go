@@ -264,6 +264,17 @@ func (e *Executor) createIssue(ctx context.Context, instance domain.MulticaInsta
 	if changeID == "" {
 		return nil, fmt.Errorf("%w: Multica Create Issue requires change_id", domain.ErrInvalid)
 	}
+	if existing, err := e.store.GetCorrelation(ctx, connection.WorkspaceID, connection.ID, connection.SourceGitLabProject.ExternalID, changeID); err == nil {
+		return map[string]any{
+			"issue_id":            existing.TargetIdentity,
+			"project_id":          projectID,
+			"provider_request_id": existing.ProviderRequestID,
+			"correlation_id":      execution.CorrelationID,
+			"deduplicated":        true,
+		}, nil
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return nil, err
+	}
 	title := firstNonEmpty(stringValue(input["title"]), "[SpecWire] "+changeID)
 	status := firstNonEmpty(stringValue(input["status"]), "backlog")
 	if status != "backlog" && status != "todo" {
@@ -277,7 +288,8 @@ func (e *Executor) createIssue(ctx context.Context, instance domain.MulticaInsta
 	if result.IssueID == "" {
 		return nil, fmt.Errorf("%w: Multica adapter returned no issue ID", domain.ErrInvalid)
 	}
-	change := domain.Correlation{ID: domain.NewID(), WorkspaceID: connection.WorkspaceID, ConnectionID: connection.ID, SourceIdentity: connection.SourceGitLabProject.ExternalID, SourceIssueIID: intValue(input["issue_iid"]), PublicationIdentity: changeID, TargetIdentity: result.IssueID, FlowExecutionID: execution.ID, ProviderRequestID: result.RequestID}
+	issueIID := intValue(input["issue_iid"])
+	change := domain.Correlation{ID: domain.NewID(), WorkspaceID: connection.WorkspaceID, ConnectionID: connection.ID, SourceIdentity: connection.SourceGitLabProject.ExternalID, SourceIssueIID: issueIID, SourceIssueIIDs: []int{issueIID}, PublicationIdentity: changeID, TargetIdentity: result.IssueID, FlowExecutionID: execution.ID, ProviderRequestID: result.RequestID}
 	if _, err := e.store.UpsertCorrelation(ctx, change); err != nil {
 		return nil, err
 	}
@@ -302,7 +314,11 @@ func (e *Executor) completeIssue(ctx context.Context, instance domain.MulticaIns
 		return nil, err
 	}
 	out := map[string]any{"issue_id": correlation.TargetIdentity, "status": result.Status, "provider_request_id": result.RequestID, "correlation_id": execution.CorrelationID}
-	if e.credentials == nil || correlation.SourceIssueIID <= 0 {
+	issueIIDs := append([]int(nil), correlation.SourceIssueIIDs...)
+	if len(issueIIDs) == 0 && correlation.SourceIssueIID > 0 {
+		issueIIDs = []int{correlation.SourceIssueIID}
+	}
+	if e.credentials == nil || len(issueIIDs) == 0 {
 		out["gitlab_issue_close"] = "skipped"
 		return out, nil
 	}
@@ -316,10 +332,15 @@ func (e *Executor) completeIssue(ctx context.Context, instance domain.MulticaIns
 	}
 	defer cleanup()
 	project := provider.GitLabProject{InstanceID: connection.SourceGitLabProject.InstanceID, ExternalID: connection.SourceGitLabProject.ExternalID, FullPath: connection.SourceGitLabProject.FullPath, Name: connection.SourceGitLabProject.Name, WebURL: connection.SourceGitLabProject.WebURL, SSHURL: connection.SourceGitLabProject.SSHURL, HTTPSURL: connection.SourceGitLabProject.HTTPSURL}
-	if err := e.gitlab.CloseIssue(ctx, gitlabInstance, project, correlation.SourceIssueIID, credential); err != nil {
-		return nil, &reconciliationError{err: fmt.Errorf("close GitLab publication Issue: %w", err)}
+	closed := 0
+	for _, issueIID := range issueIIDs {
+		if err := e.gitlab.CloseIssue(ctx, gitlabInstance, project, issueIID, credential); err != nil {
+			return nil, &reconciliationError{err: fmt.Errorf("close GitLab publication Issue %d: %w", issueIID, err)}
+		}
+		closed++
 	}
 	out["gitlab_issue_close"] = "closed"
+	out["gitlab_issues_closed"] = closed
 	_ = event
 	return out, nil
 }

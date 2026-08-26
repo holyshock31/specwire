@@ -173,7 +173,10 @@ func (i *Ingress) accept(ctx context.Context, envelope GitLabEnvelope) (IngressR
 				Payload:                 security.RedactValue(payload).(map[string]any),
 				PayloadHash:             rawHash(envelope.RawBody),
 			}
-			job := domain.Job{ID: domain.NewID(), WorkspaceID: route.WorkspaceID, Kind: JobKindFlowExecute, Payload: map[string]any{"execution_id": execution.ID}}
+			job := domain.Job{ID: domain.NewID(), WorkspaceID: route.WorkspaceID, Kind: JobKindFlowExecute, Payload: map[string]any{
+				"execution_id":  execution.ID,
+				"connection_id": route.ConnectionID,
+			}}
 			created, isNew, err := i.store.AcceptInboundEvent(ctx, event, execution, job)
 			if err != nil {
 				return result, err

@@ -28,6 +28,7 @@ type Server struct {
 	authorization auth.Store
 	accounts      AccountReader
 	endpoints     *controlplane.EndpointService
+	integration   *IntegrationServices
 	secureCookie  bool
 }
 
@@ -39,6 +40,13 @@ func NewServer(local *auth.LocalProvider, authorization auth.Store, accounts Acc
 }
 
 func (s *Server) SetSecureCookie(secure bool) { s.secureCookie = secure }
+
+// SetIntegrationServices attaches the persistent Integration Flow control
+// plane.  It is deliberately optional so the legacy endpoint API and its
+// callers remain compatible during the cutover.
+func (s *Server) SetIntegrationServices(services IntegrationServices) {
+	s.integration = &services
+}
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.URL.Path, "/api/v1/") {
@@ -56,6 +64,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "auth/me" && r.Method == http.MethodGet:
 		s.handleMe(w, r)
 	case strings.HasPrefix(path, "workspaces/"):
+		if s.integration != nil && s.handleIntegration(w, r, path) {
+			return
+		}
 		s.handleWorkspace(w, r, strings.TrimPrefix(path, "workspaces/"))
 	default:
 		http.NotFound(w, r)

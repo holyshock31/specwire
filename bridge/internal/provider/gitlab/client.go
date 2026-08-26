@@ -174,7 +174,7 @@ func (c *Client) EnsureHook(ctx context.Context, instance domain.GitLabInstance,
 	pushEvents, issueEvents := hookEvents(spec.Events)
 	form := hookForm(spec.URL, string(spec.SigningToken), pushEvents, issueEvents)
 	for _, hook := range hooks {
-		if hook.URL != spec.URL {
+		if hook.URL != spec.URL && !sameHookEndpoint(hook.URL, spec.URL) {
 			continue
 		}
 		path := projectPath(project) + "/hooks/" + strconv.FormatInt(hook.ID, 10)
@@ -200,6 +200,22 @@ func (c *Client) EnsureHook(ctx context.Context, instance domain.GitLabInstance,
 		return provider.HookResult{}, c.invalidResponse("create hook", errors.New("response did not contain hook id"))
 	}
 	return provider.HookResult{ExternalID: strconv.FormatInt(hook.ID, 10), Created: true, RequestID: firstNonEmpty(requestID, hook.RequestID)}, nil
+}
+
+// sameHookEndpoint lets migration adopt the pre-instance-hint callback URL.
+// Query parameters are deliberately ignored here: the project and endpoint
+// identity have already been fixed by the API path, while instance_id is the
+// new routing hint added by the persistent control plane.
+func sameHookEndpoint(left, right string) bool {
+	a, err := url.Parse(strings.TrimSpace(left))
+	if err != nil {
+		return false
+	}
+	b, err := url.Parse(strings.TrimSpace(right))
+	if err != nil {
+		return false
+	}
+	return a.Scheme == b.Scheme && a.Host == b.Host && a.Path == b.Path
 }
 
 func (c *Client) CloseIssue(ctx context.Context, instance domain.GitLabInstance, project provider.GitLabProject, iid int, credential *provider.Credential) error {

@@ -69,6 +69,26 @@ func (s *Store) GetWorkspace(ctx context.Context, workspaceID domain.ID) (domain
 	return w, nil
 }
 
+func (s *Store) GetWorkspaceBySlug(ctx context.Context, slug string) (domain.Workspace, error) {
+	var workspace domain.Workspace
+	var created, updated string
+	err := s.db.QueryRowContext(ctx, `SELECT id, slug, name, status, created_at, updated_at
+		FROM workspaces WHERE slug = ?`, strings.TrimSpace(slug)).Scan(
+		&workspace.ID, &workspace.Slug, &workspace.Name, &workspace.Status, &created, &updated)
+	if err == sql.ErrNoRows {
+		return domain.Workspace{}, fmt.Errorf("%w: workspace %s", domain.ErrNotFound, slug)
+	}
+	if err != nil {
+		return domain.Workspace{}, fmt.Errorf("get workspace by slug: %w", err)
+	}
+	workspace.CreatedAt, err = decodeTime(created)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+	workspace.UpdatedAt, err = decodeTime(updated)
+	return workspace, err
+}
+
 func (s *Store) CreateAccount(ctx context.Context, account domain.Account) error {
 	if account.Status == "" {
 		account.Status = domain.AccountActive
@@ -211,6 +231,60 @@ func (s *Store) GetConnection(ctx context.Context, workspaceID, connectionID dom
 	return c, nil
 }
 
+// ListConnections returns only connections owned by the requested Workspace.
+// The provider identities are returned as snapshots so callers never need to
+// infer endpoint scope from a human-readable project path.
+func (s *Store) ListConnections(ctx context.Context, workspaceID domain.ID) ([]domain.Connection, error) {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		id, workspace_id, name,
+		source_gitlab_instance_id, source_group_external_id, source_project_external_id, source_project_path,
+		source_project_web_url, source_project_ssh_url, source_project_https_url,
+		target_multica_instance_id, target_project_external_id, target_project_name,
+		target_project_web_url, status, configured_at, ready_at, disabled_at, created_by
+		FROM connections WHERE workspace_id = ? ORDER BY name, id`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list connections: %w", err)
+	}
+	defer rows.Close()
+	var result []domain.Connection
+	for rows.Next() {
+		var connection domain.Connection
+		var configured string
+		var ready, disabled sql.NullString
+		var createdBy sql.NullString
+		if err := rows.Scan(
+			&connection.ID, &connection.WorkspaceID, &connection.Name,
+			&connection.SourceGitLabProject.InstanceID, &connection.SourceGitLabProject.GroupID, &connection.SourceGitLabProject.ExternalID,
+			&connection.SourceGitLabProject.FullPath, &connection.SourceGitLabProject.WebURL,
+			&connection.SourceGitLabProject.SSHURL, &connection.SourceGitLabProject.HTTPSURL,
+			&connection.TargetMulticaProject.InstanceID, &connection.TargetMulticaProject.ExternalID,
+			&connection.TargetMulticaProject.Name, &connection.TargetMulticaProject.WebURL,
+			&connection.Status, &configured, &ready, &disabled, &createdBy); err != nil {
+			return nil, fmt.Errorf("scan connection: %w", err)
+		}
+		if createdBy.Valid {
+			connection.CreatedBy = domain.ID(createdBy.String)
+		}
+		connection.ConfiguredAt, err = decodeTime(configured)
+		if err != nil {
+			return nil, fmt.Errorf("decode connection configured_at: %w", err)
+		}
+		connection.ReadyAt, err = decodeOptionalTime(ready)
+		if err != nil {
+			return nil, fmt.Errorf("decode connection ready_at: %w", err)
+		}
+		connection.DisabledAt, err = decodeOptionalTime(disabled)
+		if err != nil {
+			return nil, fmt.Errorf("decode connection disabled_at: %w", err)
+		}
+		result = append(result, connection)
+	}
+	return result, rows.Err()
+}
+
 func (s *Store) CreateFlow(ctx context.Context, flow domain.Flow) error {
 	if flow.Status == "" {
 		flow.Status = domain.FlowDraft
@@ -276,8 +350,15 @@ func (s *Store) ListFlows(ctx context.Context, workspaceID, connectionID domain.
 	if err := requireWorkspaceID(workspaceID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, connection_id, name, description, status, active_version, created_by, updated_at
-		FROM flows WHERE workspace_id = ? AND connection_id = ? ORDER BY name, id`, workspaceID, connectionID)
+	query := `SELECT id, workspace_id, connection_id, name, description, status, active_version, created_by, updated_at
+		FROM flows WHERE workspace_id = ?`
+	args := []any{workspaceID}
+	if !connectionID.Empty() {
+		query += ` AND connection_id = ?`
+		args = append(args, connectionID)
+	}
+	query += ` ORDER BY name, id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list flows: %w", err)
 	}
@@ -441,6 +522,31 @@ func (s *Store) GetFlowVersion(ctx context.Context, workspaceID, flowID domain.I
 		return domain.FlowVersion{}, fmt.Errorf("decode flow published_at: %w", err)
 	}
 	return v, nil
+}
+
+func (s *Store) ListFlowVersions(ctx context.Context, workspaceID, flowID domain.ID) ([]domain.FlowVersion, error) {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT version FROM flow_versions
+		WHERE workspace_id = ? AND flow_id = ? ORDER BY version DESC`, workspaceID, flowID)
+	if err != nil {
+		return nil, fmt.Errorf("list flow versions: %w", err)
+	}
+	defer rows.Close()
+	var result []domain.FlowVersion
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			return nil, err
+		}
+		item, err := s.GetFlowVersion(ctx, workspaceID, flowID, version)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) NextFlowVersion(ctx context.Context, workspaceID, flowID domain.ID) (int, error) {

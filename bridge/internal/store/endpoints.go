@@ -113,7 +113,12 @@ func (s *Store) DisableConnection(ctx context.Context, workspaceID, connectionID
 	if err := requireWorkspaceID(workspaceID); err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE connections SET status = ?, disabled_at = ?
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin disable connection: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE connections SET status = ?, disabled_at = ?
 		WHERE workspace_id = ? AND id = ?`, domain.ConnectionDisabled, nowText(), workspaceID, connectionID)
 	if err != nil {
 		return fmt.Errorf("disable connection: %w", err)
@@ -125,18 +130,27 @@ func (s *Store) DisableConnection(ctx context.Context, workspaceID, connectionID
 	if affected == 0 {
 		return fmt.Errorf("%w: connection %s", domain.ErrNotFound, connectionID)
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE hook_routes SET status = 'disabled'
+		WHERE workspace_id = ? AND connection_id = ?`, workspaceID, connectionID); err != nil {
+		return fmt.Errorf("disable connection routes: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit disable connection: %w", err)
+	}
 	return nil
 }
 
 func (s *Store) GetGitLabInstance(ctx context.Context, workspaceID, instanceID domain.ID) (domain.GitLabInstance, error) {
 	var instance domain.GitLabInstance
 	var external, credential sql.NullString
+	var credentialAlias, credentialKind sql.NullString
 	var capabilities string
-	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, name, base_url,
-		external_id, credential_ref_id, status, capabilities_json FROM gitlab_instances
-		WHERE workspace_id = ? AND id = ?`, workspaceID, instanceID).Scan(
+	err := s.db.QueryRowContext(ctx, `SELECT i.id, i.workspace_id, i.name, i.base_url,
+		i.external_id, i.credential_ref_id, i.status, i.capabilities_json, s.alias, s.kind FROM gitlab_instances i
+		LEFT JOIN secrets s ON s.ref_id = i.credential_ref_id AND s.workspace_id = i.workspace_id
+		WHERE i.workspace_id = ? AND i.id = ?`, workspaceID, instanceID).Scan(
 		&instance.ID, &instance.WorkspaceID, &instance.Name, &instance.BaseURL,
-		&external, &credential, &instance.Status, &capabilities)
+		&external, &credential, &instance.Status, &capabilities, &credentialAlias, &credentialKind)
 	if err != nil {
 		if isNoRows(err) {
 			return domain.GitLabInstance{}, fmt.Errorf("%w: GitLab instance %s", domain.ErrNotFound, instanceID)
@@ -147,7 +161,7 @@ func (s *Store) GetGitLabInstance(ctx context.Context, workspaceID, instanceID d
 		instance.ExternalID = external.String
 	}
 	if credential.Valid && credential.String != "" {
-		instance.CredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+		instance.CredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID, Alias: credentialAlias.String, Kind: domain.SecretKind(credentialKind.String)}
 	}
 	if err := json.Unmarshal([]byte(capabilities), &instance.Capabilities); err != nil {
 		return domain.GitLabInstance{}, fmt.Errorf("decode GitLab capabilities: %w", err)
@@ -158,12 +172,14 @@ func (s *Store) GetGitLabInstance(ctx context.Context, workspaceID, instanceID d
 func (s *Store) GetMulticaInstance(ctx context.Context, workspaceID, instanceID domain.ID) (domain.MulticaInstance, error) {
 	var instance domain.MulticaInstance
 	var external, credential sql.NullString
+	var credentialAlias, credentialKind sql.NullString
 	var capabilities string
-	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, name, base_url,
-		external_id, management_credential_ref_id, status, capabilities_json FROM multica_instances
-		WHERE workspace_id = ? AND id = ?`, workspaceID, instanceID).Scan(
+	err := s.db.QueryRowContext(ctx, `SELECT i.id, i.workspace_id, i.name, i.base_url,
+		i.external_id, i.management_credential_ref_id, i.status, i.capabilities_json, s.alias, s.kind FROM multica_instances i
+		LEFT JOIN secrets s ON s.ref_id = i.management_credential_ref_id AND s.workspace_id = i.workspace_id
+		WHERE i.workspace_id = ? AND i.id = ?`, workspaceID, instanceID).Scan(
 		&instance.ID, &instance.WorkspaceID, &instance.Name, &instance.BaseURL,
-		&external, &credential, &instance.Status, &capabilities)
+		&external, &credential, &instance.Status, &capabilities, &credentialAlias, &credentialKind)
 	if err == sql.ErrNoRows {
 		return domain.MulticaInstance{}, fmt.Errorf("%w: Multica instance %s", domain.ErrNotFound, instanceID)
 	}
@@ -174,7 +190,7 @@ func (s *Store) GetMulticaInstance(ctx context.Context, workspaceID, instanceID 
 		instance.ExternalID = external.String
 	}
 	if credential.Valid && credential.String != "" {
-		instance.ManagementCredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+		instance.ManagementCredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID, Alias: credentialAlias.String, Kind: domain.SecretKind(credentialKind.String)}
 	}
 	if err := json.Unmarshal([]byte(capabilities), &instance.Capabilities); err != nil {
 		return domain.MulticaInstance{}, fmt.Errorf("decode Multica capabilities: %w", err)
@@ -188,8 +204,9 @@ func (s *Store) ListGitLabInstances(ctx context.Context, workspaceID domain.ID) 
 	if err := requireWorkspaceID(workspaceID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, base_url, external_id, credential_ref_id, status, capabilities_json
-		FROM gitlab_instances WHERE workspace_id = ? ORDER BY name, id`, workspaceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.name, i.base_url, i.external_id, i.credential_ref_id, i.status, i.capabilities_json, s.alias, s.kind
+		FROM gitlab_instances i LEFT JOIN secrets s ON s.ref_id = i.credential_ref_id AND s.workspace_id = i.workspace_id
+		WHERE i.workspace_id = ? ORDER BY i.name, i.id`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list GitLab instances: %w", err)
 	}
@@ -199,7 +216,8 @@ func (s *Store) ListGitLabInstances(ctx context.Context, workspaceID domain.ID) 
 		var item domain.GitLabInstance
 		var external, credential sql.NullString
 		var capabilities string
-		if err := rows.Scan(&item.ID, &item.Name, &item.BaseURL, &external, &credential, &item.Status, &capabilities); err != nil {
+		var credentialAlias, credentialKind sql.NullString
+		if err := rows.Scan(&item.ID, &item.Name, &item.BaseURL, &external, &credential, &item.Status, &capabilities, &credentialAlias, &credentialKind); err != nil {
 			return nil, err
 		}
 		item.WorkspaceID = workspaceID
@@ -207,7 +225,7 @@ func (s *Store) ListGitLabInstances(ctx context.Context, workspaceID domain.ID) 
 			item.ExternalID = external.String
 		}
 		if credential.Valid && credential.String != "" {
-			item.CredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+			item.CredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID, Alias: credentialAlias.String, Kind: domain.SecretKind(credentialKind.String)}
 		}
 		if err := json.Unmarshal([]byte(capabilities), &item.Capabilities); err != nil {
 			return nil, fmt.Errorf("decode GitLab capabilities: %w", err)
@@ -221,8 +239,9 @@ func (s *Store) ListMulticaInstances(ctx context.Context, workspaceID domain.ID)
 	if err := requireWorkspaceID(workspaceID); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, base_url, external_id, management_credential_ref_id, status, capabilities_json
-		FROM multica_instances WHERE workspace_id = ? ORDER BY name, id`, workspaceID)
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.name, i.base_url, i.external_id, i.management_credential_ref_id, i.status, i.capabilities_json, s.alias, s.kind
+		FROM multica_instances i LEFT JOIN secrets s ON s.ref_id = i.management_credential_ref_id AND s.workspace_id = i.workspace_id
+		WHERE i.workspace_id = ? ORDER BY i.name, i.id`, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list Multica instances: %w", err)
 	}
@@ -232,7 +251,8 @@ func (s *Store) ListMulticaInstances(ctx context.Context, workspaceID domain.ID)
 		var item domain.MulticaInstance
 		var external, credential sql.NullString
 		var capabilities string
-		if err := rows.Scan(&item.ID, &item.Name, &item.BaseURL, &external, &credential, &item.Status, &capabilities); err != nil {
+		var credentialAlias, credentialKind sql.NullString
+		if err := rows.Scan(&item.ID, &item.Name, &item.BaseURL, &external, &credential, &item.Status, &capabilities, &credentialAlias, &credentialKind); err != nil {
 			return nil, err
 		}
 		item.WorkspaceID = workspaceID
@@ -240,7 +260,7 @@ func (s *Store) ListMulticaInstances(ctx context.Context, workspaceID domain.ID)
 			item.ExternalID = external.String
 		}
 		if credential.Valid && credential.String != "" {
-			item.ManagementCredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+			item.ManagementCredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID, Alias: credentialAlias.String, Kind: domain.SecretKind(credentialKind.String)}
 		}
 		if err := json.Unmarshal([]byte(capabilities), &item.Capabilities); err != nil {
 			return nil, fmt.Errorf("decode Multica capabilities: %w", err)
@@ -312,11 +332,14 @@ func (s *Store) disableEndpoint(ctx context.Context, table string, workspaceID, 
 func (s *Store) GetGitLabGroupBinding(ctx context.Context, workspaceID, bindingID domain.ID) (domain.GitLabGroupBinding, error) {
 	var binding domain.GitLabGroupBinding
 	var credential, profile sql.NullString
+	var credentialAlias, credentialKind sql.NullString
 	var inherit int
-	err := s.db.QueryRowContext(ctx, `SELECT id, gitlab_instance_id, external_group_id, full_path,
-		credential_ref_id, credential_profile_id, inherit_subgroups, status FROM gitlab_group_bindings
-		WHERE workspace_id = ? AND id = ?`, workspaceID, bindingID).Scan(&binding.ID, &binding.GitLabInstanceID,
-		&binding.ExternalGroupID, &binding.FullPath, &credential, &profile, &inherit, &binding.Status)
+	err := s.db.QueryRowContext(ctx, `SELECT b.id, b.gitlab_instance_id, b.external_group_id, b.full_path,
+		b.credential_ref_id, b.credential_profile_id, b.inherit_subgroups, b.status, s.alias, s.kind
+		FROM gitlab_group_bindings b
+		LEFT JOIN secrets s ON s.ref_id = b.credential_ref_id AND s.workspace_id = b.workspace_id
+		WHERE b.workspace_id = ? AND b.id = ?`, workspaceID, bindingID).Scan(&binding.ID, &binding.GitLabInstanceID,
+		&binding.ExternalGroupID, &binding.FullPath, &credential, &profile, &inherit, &binding.Status, &credentialAlias, &credentialKind)
 	if err == sql.ErrNoRows {
 		return domain.GitLabGroupBinding{}, fmt.Errorf("%w: GitLab group binding %s", domain.ErrNotFound, bindingID)
 	}
@@ -329,9 +352,50 @@ func (s *Store) GetGitLabGroupBinding(ctx context.Context, workspaceID, bindingI
 		binding.CredentialProfileID = domain.ID(profile.String)
 	}
 	if credential.Valid && credential.String != "" {
-		binding.CredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID}
+		binding.CredentialRef = &domain.SecretRef{ID: domain.ID(credential.String), WorkspaceID: workspaceID, Alias: credentialAlias.String, Kind: domain.SecretKind(credentialKind.String)}
 	}
 	return binding, nil
+}
+
+// GetGitLabGroupBindingByGroup resolves a configured Group without exposing
+// another Workspace's binding.  It is used by route reconciliation and the
+// runtime credential seam.
+func (s *Store) GetGitLabGroupBindingByGroup(ctx context.Context, workspaceID, instanceID domain.ID, externalGroupID string) (domain.GitLabGroupBinding, error) {
+	var bindingID string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM gitlab_group_bindings
+		WHERE workspace_id = ? AND gitlab_instance_id = ? AND external_group_id = ?`, workspaceID, instanceID, externalGroupID).Scan(&bindingID)
+	if err == sql.ErrNoRows {
+		return domain.GitLabGroupBinding{}, fmt.Errorf("%w: GitLab Group %s", domain.ErrNotFound, externalGroupID)
+	}
+	if err != nil {
+		return domain.GitLabGroupBinding{}, fmt.Errorf("find GitLab Group binding: %w", err)
+	}
+	return s.GetGitLabGroupBinding(ctx, workspaceID, domain.ID(bindingID))
+}
+
+func (s *Store) ListGitLabGroupBindings(ctx context.Context, workspaceID, instanceID domain.ID) ([]domain.GitLabGroupBinding, error) {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM gitlab_group_bindings
+		WHERE workspace_id = ? AND gitlab_instance_id = ? ORDER BY full_path, id`, workspaceID, instanceID)
+	if err != nil {
+		return nil, fmt.Errorf("list GitLab Group bindings: %w", err)
+	}
+	defer rows.Close()
+	var result []domain.GitLabGroupBinding
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		item, err := s.GetGitLabGroupBinding(ctx, workspaceID, domain.ID(id))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) UpdateGitLabGroupCredential(ctx context.Context, workspaceID, bindingID, profileID domain.ID, ref *domain.SecretRef) error {

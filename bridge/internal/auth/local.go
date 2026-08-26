@@ -82,6 +82,13 @@ func (p *LocalProvider) BootstrapFirstAdmin(ctx context.Context, email, password
 	now := p.now().UTC()
 	account := domain.Account{ID: domain.NewID(), Email: email, DisplayName: strings.TrimSpace(displayName), Status: domain.AccountActive, CreatedAt: now, UpdatedAt: now}
 	workspace := domain.Workspace{ID: domain.NewID(), Slug: "default", Name: "Default Workspace", Status: domain.WorkspaceActive, CreatedAt: now, UpdatedAt: now}
+	if reader, ok := p.store.(interface {
+		GetWorkspaceBySlug(context.Context, string) (domain.Workspace, error)
+	}); ok {
+		if existing, err := reader.GetWorkspaceBySlug(ctx, workspace.Slug); err == nil {
+			workspace = existing
+		}
+	}
 	if err := p.store.BootstrapFirstAdmin(ctx, account, hash, workspace, domain.NewID(), domain.NewID()); err != nil {
 		return domain.Account{}, domain.Workspace{}, err
 	}

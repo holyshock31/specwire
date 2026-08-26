@@ -35,13 +35,19 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel})))
 
-	store, err := OpenStore(cfg.DBPath)
+	legacyStore, err := OpenStore(cfg.DBPath)
 	if err != nil {
 		slog.Error("store open failed", "path", cfg.DBPath, "error", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer legacyStore.Close()
 	slog.Info("store ready", "path", cfg.DBPath)
+	persistent, err := newPersistentApplication(cfg)
+	if err != nil {
+		slog.Error("persistent application load failed", "error", err)
+		os.Exit(1)
+	}
+	defer persistent.store.Close()
 
 	// 运行时配置指针：admin API copy-on-write 替换，webhook 侧原子读快照（无锁）。
 	cfgPtr := &atomic.Pointer[Config]{}
@@ -52,7 +58,8 @@ func main() {
 		filepath.Join(filepath.Dir(cfg.DBPath), "admin-state.json"))
 
 	mux := http.NewServeMux()
-	mux.Handle("/gitlab/specwire", &webhookHandler{cfgPtr: cfgPtr, store: store, gitlab: gitlab})
+	mux.Handle("/gitlab/specwire", persistent.ingress)
+	mux.Handle("/api/v1/", persistent.api)
 	mux.Handle("/admin/", admin)
 
 	srv := &http.Server{
@@ -68,6 +75,12 @@ func main() {
 		slog.Info("bridge listening", "addr", cfg.ListenAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server failed", "error", err)
+			stop()
+		}
+	}()
+	go func() {
+		if err := persistent.worker.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("runtime worker stopped", "error", err)
 			stop()
 		}
 	}()
