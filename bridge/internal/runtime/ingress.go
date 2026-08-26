@@ -109,8 +109,17 @@ func (i *Ingress) accept(ctx context.Context, envelope GitLabEnvelope) (IngressR
 
 	var result IngressResult
 	matched := false
+	catalogs := map[domain.ID]flow.Catalog{}
 	for _, route := range verified {
-		behavior, ok := i.behaviors.Behavior(route.BehaviorKey, route.BehaviorVersion)
+		catalog, ok := catalogs[route.WorkspaceID]
+		if !ok {
+			catalog, err = i.catalogForWorkspace(ctx, route.WorkspaceID)
+			if err != nil {
+				return result, err
+			}
+			catalogs[route.WorkspaceID] = catalog
+		}
+		behavior, ok := catalog.Behavior(route.BehaviorKey, route.BehaviorVersion)
 		if !ok || behavior.Direction != domain.DirectionInput {
 			result.Ignored++
 			continue
@@ -160,7 +169,7 @@ func (i *Ingress) accept(ctx context.Context, envelope GitLabEnvelope) (IngressR
 				IdempotencyKey: idempotencyKey(route.HookRoute, connection, action),
 				CorrelationID:  correlationID(route.HookRoute, action),
 				Status:         domain.ExecutionQueued,
-				CurrentNodeID:  inputNodeID(version.Graph, i.behaviors),
+				CurrentNodeID:  inputNodeID(version.Graph, catalog),
 			}
 			event := domain.InboundEvent{
 				ID:                      domain.NewID(),

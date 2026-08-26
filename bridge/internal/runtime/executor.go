@@ -52,6 +52,10 @@ func (e *Executor) ExecuteInWorkspace(ctx context.Context, workspaceID, executio
 	if err != nil {
 		return e.failExecution(ctx, execution, "storage", err)
 	}
+	catalog, err := e.catalogForWorkspace(ctx, workspaceID)
+	if err != nil {
+		return e.failExecution(ctx, execution, "registry", err)
+	}
 
 	nodes := make(map[domain.ID]domain.FlowNode, len(version.Graph.Nodes))
 	for _, node := range version.Graph.Nodes {
@@ -61,7 +65,7 @@ func (e *Executor) ExecuteInWorkspace(ctx context.Context, workspaceID, executio
 	if err != nil {
 		return e.failExecution(ctx, execution, "validation", err)
 	}
-	inputID := inputNodeID(version.Graph, e.catalog)
+	inputID := inputNodeID(version.Graph, catalog)
 	if inputID.Empty() {
 		return e.failExecution(ctx, execution, "validation", fmt.Errorf("%w: input ConnectorNode is missing", domain.ErrInvalid))
 	}
@@ -115,7 +119,7 @@ func (e *Executor) ExecuteInWorkspace(ctx context.Context, workspaceID, executio
 		if err := e.store.CreateNodeExecution(ctx, nodeExecution); err != nil {
 			return e.failExecution(ctx, execution, "storage", err)
 		}
-		value, nodeErr := e.executeNode(ctx, node, input, event, execution, connection, ctxValue)
+		value, nodeErr := e.executeNode(ctx, node, input, event, execution, connection, ctxValue, catalog)
 		if nodeErr != nil {
 			category, status := classifyNodeError(nodeErr)
 			nodeExecution.Status = status
@@ -154,7 +158,7 @@ func (e *Executor) ExecuteInWorkspace(ctx context.Context, workspaceID, executio
 		}
 		propagate(version.Graph, nodeID, value, inputs, active)
 		if node.Kind == domain.NodeConnector && node.Connector != nil {
-			behavior, ok := e.catalog.Behavior(node.Connector.BehaviorKey, node.Connector.BehaviorVersion)
+			behavior, ok := catalog.Behavior(node.Connector.BehaviorKey, node.Connector.BehaviorVersion)
 			if ok && behavior.Direction == domain.DirectionOutput {
 				outputCount++
 			}
@@ -169,13 +173,13 @@ func (e *Executor) ExecuteInWorkspace(ctx context.Context, workspaceID, executio
 	return e.store.UpdateFlowExecution(ctx, execution)
 }
 
-func (e *Executor) executeNode(ctx context.Context, node domain.FlowNode, input map[string]any, event domain.InboundEvent, execution domain.FlowExecution, connection domain.Connection, runtimeContext flow.RuntimeContext) (any, error) {
+func (e *Executor) executeNode(ctx context.Context, node domain.FlowNode, input map[string]any, event domain.InboundEvent, execution domain.FlowExecution, connection domain.Connection, runtimeContext flow.RuntimeContext, catalog flow.Catalog) (any, error) {
 	switch node.Kind {
 	case domain.NodeConnector:
 		if node.Connector == nil {
 			return nil, fmt.Errorf("%w: connector node configuration is missing", domain.ErrInvalid)
 		}
-		behavior, ok := e.catalog.Behavior(node.Connector.BehaviorKey, node.Connector.BehaviorVersion)
+		behavior, ok := catalog.Behavior(node.Connector.BehaviorKey, node.Connector.BehaviorVersion)
 		if !ok {
 			return nil, fmt.Errorf("%w: connector behavior %s@%s is not registered", domain.ErrInvalid, node.Connector.BehaviorKey, node.Connector.BehaviorVersion)
 		}
@@ -193,7 +197,7 @@ func (e *Executor) executeNode(ctx context.Context, node domain.FlowNode, input 
 			if model == "" {
 				return nil, fmt.Errorf("%w: Parse/Normalize model is required", domain.ErrInvalid)
 			}
-			return flow.ParseNormalizeWithCatalog(input, model, runtimeContext, e.catalog)
+			return flow.ParseNormalizeWithCatalog(input, model, runtimeContext, catalog)
 		case flow.GenericMappingTemplate:
 			model := fixedString(node.Generic.ParameterBindings, "model")
 			if model == "" {
@@ -210,7 +214,7 @@ func (e *Executor) executeNode(ctx context.Context, node domain.FlowNode, input 
 			if (model == "MulticaCreateIssueInput.v1" || model == "MulticaCreateIssueInput@v1") && isBlank(output["description"]) {
 				output["description"] = buildIssueDescription(connection, input)
 			}
-			if err := validateModelValue(e.catalog, model, output); err != nil {
+			if err := validateModelValue(catalog, model, output); err != nil {
 				return nil, err
 			}
 			return output, nil
@@ -496,29 +500,10 @@ func mappingForNode(node domain.FlowNode, model string) (flow.MappingSpec, error
 	if binding, ok := node.Generic.ParameterBindings["mapping"]; ok && binding.Value != nil {
 		return decodeMapping(binding.Value)
 	}
-	switch model {
-	case "MulticaCreateIssueInput.v1", "MulticaCreateIssueInput@v1":
-		return flow.MappingSpec{
-			"target_project":  {Source: "$connection.target_project"},
-			"title":           {Concat: []string{"literal:[SpecWire] ", "$input.change_id"}},
-			"description":     {Source: "$input.description", Default: ""},
-			"status":          {Source: "$input.status", Default: "backlog"},
-			"assignee":        {Source: "$input.assignee", Default: ""},
-			"change_id":       {Source: "$input.change_id"},
-			"branch":          {Source: "$input.branch"},
-			"branch_head_sha": {Source: "$input.branch_head_sha"},
-			"target_ref":      {Source: "$input.target_ref", Default: "refs/heads/main"},
-			"issue_iid":       {Source: "$input.issue_iid"},
-		}, nil
-	case "MulticaCompleteIssueInput.v1", "MulticaCompleteIssueInput@v1":
-		return flow.MappingSpec{
-			"correlation_id": {Source: "$runtime.flow_execution_id"},
-			"change_id":      {Source: "$input.change_id"},
-			"desired_status": {Constant: "done"},
-		}, nil
-	default:
-		return nil, fmt.Errorf("%w: no default mapping for model %s", domain.ErrInvalid, model)
+	if mapping, ok := flow.DefaultMappingForModel(model); ok {
+		return mapping, nil
 	}
+	return nil, fmt.Errorf("%w: no default mapping for model %s", domain.ErrInvalid, model)
 }
 
 func decodeMapping(raw any) (flow.MappingSpec, error) {

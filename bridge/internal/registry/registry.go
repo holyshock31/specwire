@@ -25,11 +25,22 @@ type AdapterAllowlist map[string]bool
 
 func (a AdapterAllowlist) IsAllowlisted(operation string) bool { return a[operation] }
 
+func (a AdapterAllowlist) Operations() []string {
+	operations := make([]string, 0, len(a))
+	for operation, enabled := range a {
+		if enabled {
+			operations = append(operations, operation)
+		}
+	}
+	sort.Strings(operations)
+	return operations
+}
+
 type AdapterCatalog interface{ IsAllowlisted(string) bool }
 
 func ValidateBehavior(item domain.ConnectorBehavior, adapters AdapterCatalog) error {
-	if strings.TrimSpace(item.Key) == "" || strings.TrimSpace(item.Version) == "" || strings.TrimSpace(item.AdapterOperation) == "" {
-		return fmt.Errorf("%w: behavior key, version and adapter operation are required", domain.ErrInvalid)
+	if strings.TrimSpace(item.ConnectorTypeKey) == "" || strings.TrimSpace(item.ConnectorTypeVersion) == "" || strings.TrimSpace(item.Key) == "" || strings.TrimSpace(item.Version) == "" || strings.TrimSpace(item.DisplayName) == "" || strings.TrimSpace(item.AdapterOperation) == "" {
+		return fmt.Errorf("%w: behavior type, key, version, display name and adapter operation are required", domain.ErrInvalid)
 	}
 	if item.Direction != domain.DirectionInput && item.Direction != domain.DirectionOutput {
 		return fmt.Errorf("%w: behavior direction is invalid", domain.ErrInvalid)
@@ -37,10 +48,75 @@ func ValidateBehavior(item domain.ConnectorBehavior, adapters AdapterCatalog) er
 	if item.ParameterSchema == nil {
 		item.ParameterSchema = map[string]any{}
 	}
+	if len(item.RequiredCapabilities) == 0 {
+		return fmt.Errorf("%w: behavior %s must declare required capabilities", domain.ErrInvalid, item.Key)
+	}
+	if strings.TrimSpace(item.IdempotencyStrategy) == "" {
+		return fmt.Errorf("%w: behavior %s must declare an idempotency strategy", domain.ErrInvalid, item.Key)
+	}
+	if strings.TrimSpace(item.Reconciliation) == "" {
+		return fmt.Errorf("%w: behavior %s must declare reconciliation capability", domain.ErrInvalid, item.Key)
+	}
+	if item.Direction == domain.DirectionInput && strings.TrimSpace(item.OutputModelRef) == "" {
+		return fmt.Errorf("%w: input behavior %s must declare an output model", domain.ErrInvalid, item.Key)
+	}
+	if item.Direction == domain.DirectionOutput && strings.TrimSpace(item.InputModelRef) == "" {
+		return fmt.Errorf("%w: output behavior %s must declare an input model", domain.ErrInvalid, item.Key)
+	}
 	if adapters == nil || !adapters.IsAllowlisted(item.AdapterOperation) {
 		return fmt.Errorf("%w: adapter operation %s is not deployed and allowlisted", domain.ErrForbidden, item.AdapterOperation)
 	}
 	return nil
+}
+
+func ValidateDataModel(item domain.DataModelDefinition) error {
+	if strings.TrimSpace(item.Key) == "" || strings.TrimSpace(item.Version) == "" || strings.TrimSpace(item.DisplayName) == "" || item.Schema == nil {
+		return fmt.Errorf("%w: data model key, version, display name and schema are required", domain.ErrInvalid)
+	}
+	if schemaType, ok := item.Schema["type"].(string); ok && schemaType != "object" {
+		return fmt.Errorf("%w: data model %s schema must be an object", domain.ErrInvalid, item.Key)
+	}
+	if properties, ok := item.Schema["properties"]; ok {
+		if _, ok := properties.(map[string]any); !ok {
+			return fmt.Errorf("%w: data model %s properties must be an object", domain.ErrInvalid, item.Key)
+		}
+	}
+	for _, field := range item.RequiredFields {
+		if strings.TrimSpace(field) == "" {
+			return fmt.Errorf("%w: data model %s has an empty required field", domain.ErrInvalid, item.Key)
+		}
+	}
+	for field, role := range item.SemanticRoles {
+		if strings.TrimSpace(field) == "" || strings.TrimSpace(role) == "" {
+			return fmt.Errorf("%w: data model %s has an incomplete semantic role", domain.ErrInvalid, item.Key)
+		}
+	}
+	if containsExecutableDefinition(item.Schema) {
+		return fmt.Errorf("%w: data model %s contains executable definition content", domain.ErrForbidden, item.Key)
+	}
+	return nil
+}
+
+func containsExecutableDefinition(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			lower := strings.ToLower(strings.TrimSpace(key))
+			if lower == "script" || lower == "code" || lower == "program" || lower == "expression" {
+				return true
+			}
+			if containsExecutableDefinition(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if containsExecutableDefinition(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (b Bundle) Validate() error {

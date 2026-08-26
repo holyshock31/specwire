@@ -596,6 +596,9 @@ func (s *Store) UpdateFlowStatus(ctx context.Context, workspaceID, flowID domain
 	if err := requireWorkspaceID(workspaceID); err != nil {
 		return err
 	}
+	if !validFlowStatus(status) {
+		return fmt.Errorf("%w: unsupported Flow status %q", domain.ErrInvalid, status)
+	}
 	result, err := s.db.ExecContext(ctx, `UPDATE flows SET status = ?, updated_at = ? WHERE workspace_id = ? AND id = ?`, status, nowText(), workspaceID, flowID)
 	if err != nil {
 		return fmt.Errorf("update flow status: %w", err)
@@ -608,6 +611,15 @@ func (s *Store) UpdateFlowStatus(ctx context.Context, workspaceID, flowID domain
 		return fmt.Errorf("%w: flow %s", domain.ErrNotFound, flowID)
 	}
 	return nil
+}
+
+func validFlowStatus(status domain.FlowStatus) bool {
+	switch status {
+	case domain.FlowDraft, domain.FlowPublished, domain.FlowPaused, domain.FlowArchived:
+		return true
+	default:
+		return false
+	}
 }
 
 func requireWorkspaceID(workspaceID domain.ID) error {

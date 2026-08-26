@@ -152,3 +152,31 @@ func TestFlowServiceTemplateInstantiationIsIndependent(t *testing.T) {
 		t.Fatal("template instances share mutable graph state")
 	}
 }
+
+func TestFlowServiceRejectsInvalidLifecycleTransitions(t *testing.T) {
+	_, service, workspaceID := openFlowService(t)
+	ctx := context.Background()
+	blank, err := service.CreateBlank(ctx, workspaceID, "connection-flow-service", "", "Blank")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Pause(ctx, workspaceID, blank.ID, 0); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("pause draft error = %v, want conflict", err)
+	}
+	if err := service.Archive(ctx, workspaceID, blank.ID); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("archive draft error = %v, want conflict", err)
+	}
+	published, err := service.CreateFromTemplate(ctx, workspaceID, "connection-flow-service", "", TemplatePublishChange, "1.0.0", "Published")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, validation, err := service.Publish(ctx, workspaceID, published.ID, ""); err != nil || !validation.Valid {
+		t.Fatalf("publish Flow: validation=%+v err=%v", validation, err)
+	}
+	if err := service.Archive(ctx, workspaceID, published.ID); err != nil {
+		t.Fatalf("archive published Flow: %v", err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, published.ID, ""); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("publish archived Flow error = %v, want conflict", err)
+	}
+}

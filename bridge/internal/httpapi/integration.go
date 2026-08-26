@@ -13,6 +13,7 @@ import (
 	"specwire/bridge/internal/domain"
 	"specwire/bridge/internal/flow"
 	"specwire/bridge/internal/provider"
+	"specwire/bridge/internal/security"
 )
 
 // IntegrationStore is the read/write seam used by the HTTP control plane.  It
@@ -763,6 +764,8 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request, session dom
 		s.handleFlowDraft(w, r, session, store, item)
 	case "validate":
 		s.handleFlowValidate(w, r, store, item)
+	case "simulate":
+		s.handleFlowSimulate(w, r, session, store, item)
 	case "publish":
 		s.handleFlowPublish(w, r, session, item)
 	case "pause":
@@ -926,6 +929,47 @@ func (s *Server) handleFlowValidate(w http.ResponseWriter, r *http.Request, stor
 		return
 	}
 	writeJSON(w, http.StatusOK, validation)
+}
+
+func (s *Server) handleFlowSimulate(w http.ResponseWriter, r *http.Request, session domain.Session, store IntegrationStore, item domain.Flow) {
+	if r.Method != http.MethodPost || s.integration.Flows == nil || !s.checkCSRF(w, r, session) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+		}
+		return
+	}
+	var request struct {
+		SampleEvent map[string]any `json:"sample_event"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	connection, err := store.GetConnection(r.Context(), item.WorkspaceID, item.ConnectionID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	result, err := s.integration.Flows.Simulate(r.Context(), item.WorkspaceID, item.ID, request.SampleEvent, flow.RuntimeContext{
+		WorkspaceID:   item.WorkspaceID,
+		ConnectionID:  item.ConnectionID,
+		SourceProject: connection.SourceGitLabProject.FullPath,
+		TargetProject: connection.TargetMulticaProject.ExternalID,
+		TargetRef:     "refs/heads/main",
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	for index := range result.Nodes {
+		if result.Nodes[index].Input != nil {
+			result.Nodes[index].Input, _ = security.RedactValue(result.Nodes[index].Input).(map[string]any)
+		}
+		if result.Nodes[index].Output != nil {
+			result.Nodes[index].Output, _ = security.RedactValue(result.Nodes[index].Output).(map[string]any)
+		}
+	}
+	s.audit(r.Context(), session.AccountID, "flow.simulate", "flow", item.ID, map[string]any{"workspace_id": item.WorkspaceID, "valid": result.Valid, "external_actions_suppressed": result.ExternalActionsSuppressed})
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleFlowPublish(w http.ResponseWriter, r *http.Request, session domain.Session, item domain.Flow) {

@@ -85,6 +85,7 @@ type Ingress struct {
 	retention   time.Duration
 	now         func() time.Time
 	behaviors   flow.Catalog
+	catalog     flow.CatalogResolver
 	instanceURL bool
 }
 
@@ -109,6 +110,10 @@ func WithRuntimeRetention(value time.Duration) IngressOption {
 	}
 }
 
+func WithCatalogResolver(resolver flow.CatalogResolver) IngressOption {
+	return func(i *Ingress) { i.catalog = resolver }
+}
+
 func NewIngress(store Store, secrets SecretResolver, catalog flow.Catalog, options ...IngressOption) (*Ingress, error) {
 	if store == nil || secrets == nil {
 		return nil, invalid("runtime ingress dependencies are required")
@@ -120,6 +125,13 @@ func NewIngress(store Store, secrets SecretResolver, catalog flow.Catalog, optio
 	return ingress, nil
 }
 
+func (i *Ingress) catalogForWorkspace(ctx context.Context, workspaceID domain.ID) (flow.Catalog, error) {
+	if i.catalog != nil {
+		return i.catalog.CatalogForWorkspace(ctx, workspaceID)
+	}
+	return i.behaviors, nil
+}
+
 type Executor struct {
 	store       Store
 	gitlab      GitLabAdapter
@@ -127,6 +139,7 @@ type Executor struct {
 	secrets     SecretResolver
 	credentials GitLabCredentialResolver
 	catalog     flow.Catalog
+	resolver    flow.CatalogResolver
 	now         func() time.Time
 	retention   time.Duration
 }
@@ -145,6 +158,10 @@ func WithExecutorRetention(value time.Duration) ExecutorOption {
 	}
 }
 
+func WithExecutorCatalogResolver(resolver flow.CatalogResolver) ExecutorOption {
+	return func(e *Executor) { e.resolver = resolver }
+}
+
 func NewExecutor(store Store, gitlab GitLabAdapter, multica MulticaAdapter, secrets SecretResolver, catalog flow.Catalog, options ...ExecutorOption) (*Executor, error) {
 	if store == nil || gitlab == nil || multica == nil {
 		return nil, invalid("runtime executor dependencies are required")
@@ -154,6 +171,13 @@ func NewExecutor(store Store, gitlab GitLabAdapter, multica MulticaAdapter, secr
 		option(e)
 	}
 	return e, nil
+}
+
+func (e *Executor) catalogForWorkspace(ctx context.Context, workspaceID domain.ID) (flow.Catalog, error) {
+	if e.resolver != nil {
+		return e.resolver.CatalogForWorkspace(ctx, workspaceID)
+	}
+	return e.catalog, nil
 }
 
 type GitLabAdapter interface {

@@ -62,6 +62,7 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	flowService.SetCatalogResolver(registryService)
 	api.SetIntegrationServices(IntegrationServices{Store: db, Flows: flowService, Registry: registryService})
 
 	server := httptest.NewServer(api)
@@ -133,6 +134,10 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	if err := json.Unmarshal([]byte(body), &created); err != nil {
 		t.Fatal(err)
 	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(created.ID)+"/simulate", `{"sample_event":{"object_kind":"issue","object_attributes":{"iid":7,"action":"open","description":"change_id: CHG-7\nbranch: change/7\nbranch_head_sha: abc123\n","labels":[{"title":"change"}]},"project":{"path_with_namespace":"platform/webdeck"}}}`, csrf)
+	if status != http.StatusOK || !strings.Contains(body, `"external_actions_suppressed":true`) || !strings.Contains(body, `"status":"suppressed"`) {
+		t.Fatalf("simulate Flow = %d %s", status, body)
+	}
 
 	status, body = jsonRequest(t, client, http.MethodGet, base+"/flows", "", nil)
 	if status != http.StatusOK || !strings.Contains(body, string(created.ID)) {
@@ -183,6 +188,31 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	status, body = jsonRequest(t, client, http.MethodPatch, base+"/registry/connector-types/"+string(registered.ID), `{"status":"published"}`, csrf)
 	if status != http.StatusOK || !strings.Contains(body, `"status":"published"`) {
 		t.Fatalf("publish connector type = %d %s", status, body)
+	}
+
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/registry/data-models", `{"key":"CustomEvent","version":"v1","display_name":"Custom Event","schema":{"type":"object","properties":{"event_id":{"type":"string"}}},"required_fields":["event_id"],"allow_extensions":true,"status":"published"}`, csrf)
+	if status != http.StatusCreated {
+		t.Fatalf("register data model = %d %s", status, body)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows", `{"connection_id":"connection-api","blank":true,"name":"Custom Model Flow"}`, csrf)
+	if status != http.StatusCreated {
+		t.Fatalf("create custom Flow = %d %s", status, body)
+	}
+	var customFlow domain.Flow
+	if err := json.Unmarshal([]byte(body), &customFlow); err != nil {
+		t.Fatal(err)
+	}
+	customGraph := domain.FlowGraph{Nodes: []domain.FlowNode{
+		{ID: "custom-input", Kind: domain.NodeConnector, Connector: &domain.ConnectorNode{BehaviorKey: "gitlab.issue-hook", BehaviorVersion: "1.0.0"}, Outputs: []domain.Port{{ID: "event", Direction: domain.PortOutput, ModelRef: "provider:gitlab.issue.v1"}}},
+		{ID: "custom-parse", Kind: domain.NodeGeneric, Generic: &domain.GenericNode{Type: flow.GenericParseNormalize, ParameterBindings: map[string]domain.ParameterBinding{"model": {Kind: domain.BindingFixed, Value: "CustomEvent.v1"}}}, Inputs: []domain.Port{{ID: "input", Direction: domain.PortInput, ModelRef: "provider:gitlab.issue.v1", Required: true}}, Outputs: []domain.Port{{ID: "custom", Direction: domain.PortOutput, ModelRef: "CustomEvent.v1"}}},
+	}, Edges: []domain.FlowEdge{{ID: "custom-edge", FromNodeID: "custom-input", FromPortID: "event", ToNodeID: "custom-parse", ToPortID: "input"}}}
+	encodedGraph, err := json.Marshal(map[string]any{"graph": customGraph})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body = jsonRequest(t, client, http.MethodPut, base+"/flows/"+string(customFlow.ID)+"/draft", string(encodedGraph), csrf)
+	if status != http.StatusOK || !strings.Contains(body, `"valid":true`) || strings.Contains(body, `model_not_found`) {
+		t.Fatalf("custom model Flow validation = %d %s", status, body)
 	}
 }
 

@@ -97,10 +97,12 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
+	hooks.SetCatalogResolver(registryService)
 	flows, err := flow.NewService(store, catalog)
 	if err != nil {
 		return nil, err
 	}
+	flows.SetCatalogResolver(registryService)
 	flows.SetRouteActivator(hooks)
 	credentialResolver, err := runtimenew.NewStoredGitLabCredentialResolver(store, vault)
 	if err != nil {
@@ -113,11 +115,13 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	retention := time.Duration(cfg.RetentionDays) * 24 * time.Hour
 	executor, err := runtimenew.NewExecutor(store, gitlab, multica, vault, catalog,
 		runtimenew.WithGitLabCredentialResolver(credentialResolver),
+		runtimenew.WithExecutorCatalogResolver(registryService),
 		runtimenew.WithExecutorRetention(retention))
 	if err != nil {
 		return nil, err
 	}
-	ingress, err := runtimenew.NewIngress(store, vault, catalog, runtimenew.WithRuntimeRetention(retention))
+	ingress, err := runtimenew.NewIngress(store, vault, catalog,
+		runtimenew.WithCatalogResolver(registryService), runtimenew.WithRuntimeRetention(retention))
 	if err != nil {
 		return nil, err
 	}

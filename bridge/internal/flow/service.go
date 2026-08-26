@@ -31,10 +31,11 @@ type RouteActivator interface {
 }
 
 type Service struct {
-	store   Store
-	catalog Catalog
-	routes  RouteActivator
-	now     func() time.Time
+	store           Store
+	catalog         Catalog
+	catalogResolver CatalogResolver
+	routes          RouteActivator
+	now             func() time.Time
 }
 
 func NewService(store Store, catalog Catalog) (*Service, error) {
@@ -45,6 +46,15 @@ func NewService(store Store, catalog Catalog) (*Service, error) {
 }
 
 func (s *Service) SetRouteActivator(routes RouteActivator) { s.routes = routes }
+
+func (s *Service) SetCatalogResolver(resolver CatalogResolver) { s.catalogResolver = resolver }
+
+func (s *Service) catalogForWorkspace(ctx context.Context, workspaceID domain.ID) (Catalog, error) {
+	if s.catalogResolver != nil {
+		return s.catalogResolver.CatalogForWorkspace(ctx, workspaceID)
+	}
+	return s.catalog, nil
+}
 
 func (s *Service) SeedBuiltins(ctx context.Context, workspaceID domain.ID) error {
 	for _, template := range BuiltinTemplates() {
@@ -86,7 +96,11 @@ func (s *Service) SaveDraft(ctx context.Context, workspaceID, flowID domain.ID, 
 	if err := s.store.SaveFlowDraft(ctx, workspaceID, flowID, graph); err != nil {
 		return ValidationResult{}, err
 	}
-	return s.catalog.Validate(graph, false), nil
+	catalog, err := s.catalogForWorkspace(ctx, workspaceID)
+	if err != nil {
+		return ValidationResult{}, err
+	}
+	return catalog.Validate(graph, false), nil
 }
 
 func (s *Service) ValidateDraft(ctx context.Context, workspaceID, flowID domain.ID) (ValidationResult, error) {
@@ -94,19 +108,50 @@ func (s *Service) ValidateDraft(ctx context.Context, workspaceID, flowID domain.
 	if err != nil {
 		return ValidationResult{}, err
 	}
-	return s.catalog.Validate(graph, true), nil
+	catalog, err := s.catalogForWorkspace(ctx, workspaceID)
+	if err != nil {
+		return ValidationResult{}, err
+	}
+	return catalog.Validate(graph, true), nil
+}
+
+// Simulate evaluates the current draft without creating a FlowVersion or
+// invoking any provider adapter.  The caller supplies the read-only runtime
+// context so mapping references resolve exactly as they would for a real
+// execution.
+func (s *Service) Simulate(ctx context.Context, workspaceID, flowID domain.ID, event map[string]any, runtimeContext RuntimeContext) (SimulationResult, error) {
+	graph, err := s.store.GetFlowDraft(ctx, workspaceID, flowID)
+	if err != nil {
+		return SimulationResult{}, err
+	}
+	catalog, err := s.catalogForWorkspace(ctx, workspaceID)
+	if err != nil {
+		return SimulationResult{}, err
+	}
+	return Simulate(graph, catalog, event, runtimeContext), nil
 }
 
 func (s *Service) Publish(ctx context.Context, workspaceID, flowID, actorID domain.ID) (domain.FlowVersion, ValidationResult, error) {
+	flowRecord, err := s.store.GetFlow(ctx, workspaceID, flowID)
+	if err != nil {
+		return domain.FlowVersion{}, ValidationResult{}, err
+	}
+	if flowRecord.Status == domain.FlowArchived {
+		return domain.FlowVersion{}, ValidationResult{}, fmt.Errorf("%w: archived Flow cannot be published", domain.ErrConflict)
+	}
 	graph, err := s.store.GetFlowDraft(ctx, workspaceID, flowID)
 	if err != nil {
 		return domain.FlowVersion{}, ValidationResult{}, err
 	}
-	validation := s.catalog.Validate(graph, true)
+	catalog, err := s.catalogForWorkspace(ctx, workspaceID)
+	if err != nil {
+		return domain.FlowVersion{}, ValidationResult{}, err
+	}
+	validation := catalog.Validate(graph, true)
 	if !validation.Valid {
 		return domain.FlowVersion{}, validation, fmt.Errorf("%w: Flow cannot be published", domain.ErrInvalid)
 	}
-	plan, err := Compile(graph, s.catalog)
+	plan, err := Compile(graph, catalog)
 	if err != nil {
 		return domain.FlowVersion{}, validation, err
 	}
@@ -132,15 +177,30 @@ func (s *Service) Publish(ctx context.Context, workspaceID, flowID, actorID doma
 }
 
 func (s *Service) Pause(ctx context.Context, workspaceID, flowID domain.ID, activeVersion int) error {
-	if err := s.store.UpdateFlowStatus(ctx, workspaceID, flowID, domain.FlowPaused); err != nil {
+	flowRecord, err := s.store.GetFlow(ctx, workspaceID, flowID)
+	if err != nil {
 		return err
 	}
-	if s.routes != nil && activeVersion > 0 {
+	if flowRecord.Status != domain.FlowPublished {
+		return fmt.Errorf("%w: only a published Flow can be paused", domain.ErrConflict)
+	}
+	if activeVersion <= 0 {
+		activeVersion = flowRecord.ActiveVersion
+	}
+	if activeVersion <= 0 {
+		return fmt.Errorf("%w: published Flow has no active version", domain.ErrConflict)
+	}
+	if s.routes != nil {
 		version, err := s.store.GetFlowVersion(ctx, workspaceID, flowID, activeVersion)
 		if err != nil {
 			return err
 		}
-		return s.routes.PauseInputFlow(ctx, version)
+		if err := s.routes.PauseInputFlow(ctx, version); err != nil {
+			return err
+		}
+	}
+	if err := s.store.UpdateFlowStatus(ctx, workspaceID, flowID, domain.FlowPaused); err != nil {
+		return err
 	}
 	return nil
 }
@@ -149,6 +209,9 @@ func (s *Service) Archive(ctx context.Context, workspaceID, flowID domain.ID) er
 	flowRecord, err := s.store.GetFlow(ctx, workspaceID, flowID)
 	if err != nil {
 		return err
+	}
+	if flowRecord.Status != domain.FlowPublished && flowRecord.Status != domain.FlowPaused {
+		return fmt.Errorf("%w: only a published or paused Flow can be archived", domain.ErrConflict)
 	}
 	if s.routes != nil && flowRecord.ActiveVersion > 0 {
 		version, err := s.store.GetFlowVersion(ctx, workspaceID, flowID, flowRecord.ActiveVersion)

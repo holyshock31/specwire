@@ -39,6 +39,7 @@ type HookReconciler struct {
 	gitlab        provider.GitLab
 	vault         HookSecretStore
 	behaviors     BehaviorResolver
+	catalog       flow.CatalogResolver
 	gitlabCredRef *domain.SecretRef
 	hookURL       string
 }
@@ -55,6 +56,8 @@ func NewHookReconciler(store HookStore, gitlab provider.GitLab, vault HookSecret
 
 func (r *HookReconciler) SetGitLabCredentialRef(ref *domain.SecretRef) { r.gitlabCredRef = ref }
 
+func (r *HookReconciler) SetCatalogResolver(resolver flow.CatalogResolver) { r.catalog = resolver }
+
 // ActivateInputFlow makes the provider Hook and the durable route ready as a
 // single idempotent reconciliation operation.  One source project can have
 // many routes, but only one Hook record/provider Hook is used.
@@ -67,7 +70,7 @@ func (r *HookReconciler) ActivateInputFlow(ctx context.Context, version domain.F
 	if err != nil {
 		return err
 	}
-	input, behavior, err := r.inputNode(version.Graph)
+	input, behavior, err := r.inputNode(ctx, version.WorkspaceID, version.Graph)
 	if err != nil {
 		return err
 	}
@@ -114,12 +117,20 @@ func (r *HookReconciler) PauseInputFlow(ctx context.Context, version domain.Flow
 	return err
 }
 
-func (r *HookReconciler) inputNode(graph domain.FlowGraph) (domain.FlowNode, domain.ConnectorBehavior, error) {
+func (r *HookReconciler) inputNode(ctx context.Context, workspaceID domain.ID, graph domain.FlowGraph) (domain.FlowNode, domain.ConnectorBehavior, error) {
+	catalog := r.behaviors
+	if r.catalog != nil {
+		resolved, err := r.catalog.CatalogForWorkspace(ctx, workspaceID)
+		if err != nil {
+			return domain.FlowNode{}, domain.ConnectorBehavior{}, err
+		}
+		catalog = resolved
+	}
 	for _, node := range graph.Nodes {
 		if node.Kind != domain.NodeConnector || node.Connector == nil {
 			continue
 		}
-		behavior, ok := r.behaviors.Behavior(node.Connector.BehaviorKey, node.Connector.BehaviorVersion)
+		behavior, ok := catalog.Behavior(node.Connector.BehaviorKey, node.Connector.BehaviorVersion)
 		if ok && behavior.Direction == domain.DirectionInput {
 			return node, behavior, nil
 		}

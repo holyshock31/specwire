@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"specwire/bridge/internal/domain"
+	"specwire/bridge/internal/flow"
 	"specwire/bridge/internal/registry"
 )
 
@@ -21,15 +22,47 @@ type RegistryStore interface {
 }
 
 type RegistryService struct {
-	store    RegistryStore
-	adapters registry.AdapterCatalog
+	store     RegistryStore
+	adapters  registry.AdapterCatalog
+	allowlist []string
 }
 
 func NewRegistryService(store RegistryStore, adapters registry.AdapterCatalog) (*RegistryService, error) {
 	if store == nil || adapters == nil {
 		return nil, fmt.Errorf("%w: registry service dependencies are required", domain.ErrInvalid)
 	}
-	return &RegistryService{store: store, adapters: adapters}, nil
+	return &RegistryService{store: store, adapters: adapters, allowlist: adapterOperations(adapters)}, nil
+}
+
+// CatalogForWorkspace builds a fresh registry view from durable definitions.
+// Registry definitions are Workspace-owned, so a single process-wide catalog
+// must not be reused for every request.
+func (s *RegistryService) CatalogForWorkspace(ctx context.Context, workspaceID domain.ID) (flow.Catalog, error) {
+	behaviors, err := s.store.ListConnectorBehaviors(ctx, workspaceID)
+	if err != nil {
+		return flow.Catalog{}, err
+	}
+	models, err := s.store.ListDataModels(ctx, workspaceID)
+	if err != nil {
+		return flow.Catalog{}, err
+	}
+	return flow.NewCatalog(behaviors, models, s.allowlist), nil
+}
+
+func (s *RegistryService) BehaviorForWorkspace(ctx context.Context, workspaceID domain.ID, key, version string) (domain.ConnectorBehavior, bool, error) {
+	catalog, err := s.CatalogForWorkspace(ctx, workspaceID)
+	if err != nil {
+		return domain.ConnectorBehavior{}, false, err
+	}
+	item, ok := catalog.Behavior(key, version)
+	return item, ok, nil
+}
+
+func adapterOperations(adapters registry.AdapterCatalog) []string {
+	if provider, ok := adapters.(interface{ Operations() []string }); ok {
+		return append([]string(nil), provider.Operations()...)
+	}
+	return nil
 }
 
 func (s *RegistryService) RegisterConnectorType(ctx context.Context, workspaceID domain.ID, item domain.ConnectorType) error {
@@ -46,6 +79,9 @@ func (s *RegistryService) RegisterConnectorBehavior(ctx context.Context, workspa
 }
 
 func (s *RegistryService) RegisterDataModel(ctx context.Context, workspaceID domain.ID, item domain.DataModelDefinition) error {
+	if err := registry.ValidateDataModel(item); err != nil {
+		return err
+	}
 	item.WorkspaceID = workspaceID
 	return s.store.RegisterDataModel(ctx, workspaceID, item)
 }

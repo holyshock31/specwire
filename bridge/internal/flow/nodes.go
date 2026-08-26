@@ -29,6 +29,37 @@ type MappingRule struct {
 
 type MappingSpec map[string]MappingRule
 
+// DefaultMappingForModel is the small, declarative-by-contract mapping set
+// used by the two built-in templates.  Custom Mapping/Template nodes can
+// provide their own MappingSpec in the graph; these defaults keep the bundled
+// templates useful without embedding a provider call or executable script in
+// the canvas.
+func DefaultMappingForModel(model string) (MappingSpec, bool) {
+	switch model {
+	case "MulticaCreateIssueInput.v1", "MulticaCreateIssueInput@v1":
+		return MappingSpec{
+			"target_project":  {Source: "$connection.target_project"},
+			"title":           {Concat: []string{"literal:[SpecWire] ", "$input.change_id"}},
+			"description":     {Source: "$input.description", Default: ""},
+			"status":          {Source: "$input.status", Default: "backlog"},
+			"assignee":        {Source: "$input.assignee", Default: ""},
+			"change_id":       {Source: "$input.change_id"},
+			"branch":          {Source: "$input.branch"},
+			"branch_head_sha": {Source: "$input.branch_head_sha"},
+			"target_ref":      {Source: "$input.target_ref", Default: "refs/heads/main"},
+			"issue_iid":       {Source: "$input.issue_iid"},
+		}, true
+	case "MulticaCompleteIssueInput.v1", "MulticaCompleteIssueInput@v1":
+		return MappingSpec{
+			"correlation_id": {Source: "$runtime.flow_execution_id"},
+			"change_id":      {Source: "$input.change_id"},
+			"desired_status": {Constant: "done"},
+		}, true
+	default:
+		return nil, false
+	}
+}
+
 func ParseNormalize(providerEvent map[string]any, model string, context RuntimeContext) (map[string]any, error) {
 	return parseNormalize(providerEvent, model, context, Catalog{})
 }
@@ -241,6 +272,39 @@ type Filter struct {
 	Field    string   `json:"field,omitempty"`
 	Value    any      `json:"value,omitempty"`
 	Children []Filter `json:"children,omitempty"`
+}
+
+// ValidateFilter checks the static, no-code filter vocabulary before a graph
+// can be published.  EvaluateFilter repeats the operational checks at runtime
+// because Flow versions are durable and must remain defensive when replayed.
+func ValidateFilter(filter Filter) error {
+	operation := strings.ToLower(strings.TrimSpace(filter.Op))
+	switch operation {
+	case "and", "or":
+		if len(filter.Children) == 0 {
+			return fmt.Errorf("%w: Boolean filter requires children", domain.ErrInvalid)
+		}
+		for _, child := range filter.Children {
+			if err := ValidateFilter(child); err != nil {
+				return err
+			}
+		}
+	case "exists", "equals", "contains", "prefix", "suffix", "gt", "gte", "lt", "lte":
+		if strings.TrimSpace(filter.Field) == "" {
+			return fmt.Errorf("%w: filter field is required", domain.ErrInvalid)
+		}
+		if operation != "exists" && filter.Value == nil {
+			return fmt.Errorf("%w: filter value is required", domain.ErrInvalid)
+		}
+		if (operation == "gt" || operation == "gte" || operation == "lt" || operation == "lte") && filter.Value != nil {
+			if _, ok := numberValue(filter.Value); !ok {
+				return fmt.Errorf("%w: comparison filter requires a numeric value", domain.ErrInvalid)
+			}
+		}
+	default:
+		return fmt.Errorf("%w: unsupported filter operator %s", domain.ErrInvalid, filter.Op)
+	}
+	return nil
 }
 
 func EvaluateFilter(input map[string]any, filter Filter) (bool, error) {

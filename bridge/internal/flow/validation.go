@@ -1,6 +1,7 @@
 package flow
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -33,6 +34,14 @@ type Catalog struct {
 	Behaviors map[string]domain.ConnectorBehavior
 	Models    map[string]domain.DataModelDefinition
 	Adapters  map[string]bool
+}
+
+// CatalogResolver supplies the registry view for one Workspace.  Keeping the
+// resolver at the application seam prevents administrator-added definitions
+// from leaking between Workspaces while preserving the small value Catalog
+// used by unit tests and compiled Flow versions.
+type CatalogResolver interface {
+	CatalogForWorkspace(context.Context, domain.ID) (Catalog, error)
 }
 
 func NewCatalog(behaviors []domain.ConnectorBehavior, models []domain.DataModelDefinition, allowlistedAdapters []string) Catalog {
@@ -234,11 +243,7 @@ func (c Catalog) Validate(graph domain.FlowGraph, publish bool) ValidationResult
 			validateBindings(path+".generic.parameter_bindings", node.Generic.ParameterBindings, add)
 			validateNoCodeParameters(path+".generic.parameter_bindings", node.Generic.ParameterBindings, add)
 			validateNoCodeConfig(path+".config", node.Config, add)
-			if node.Generic.Type == GenericConditionFilter && node.Config != nil {
-				if exclusive, ok := node.Config["mutually_exclusive"].(bool); ok && !exclusive {
-					add(path, "nonexclusive_condition", "Condition/Filter branches must be mutually exclusive")
-				}
-			}
+			validateGenericNode(path, node, c, add)
 		case domain.NodeTerminal:
 			if node.Config != nil {
 				if kind, ok := node.Config["kind"].(string); ok && kind == "error" {
@@ -249,8 +254,10 @@ func (c Catalog) Validate(graph domain.FlowGraph, publish bool) ValidationResult
 		for portIndex, port := range append(append([]domain.Port(nil), node.Inputs...), node.Outputs...) {
 			portPath := fmt.Sprintf("%s.ports[%d]", path, portIndex)
 			if port.ModelRef != "" && !isProviderModel(port.ModelRef) {
-				if _, ok := c.Model(port.ModelRef); !ok {
+				if model, ok := c.Model(port.ModelRef); !ok {
 					add(portPath, "model_not_found", "port references an unregistered DataModel version")
+				} else if !designModelAvailable(model) {
+					add(portPath, "model_unavailable", "port references a DataModel version that is not published")
 				}
 			}
 		}
@@ -330,6 +337,135 @@ func (c Catalog) Validate(graph domain.FlowGraph, publish bool) ValidationResult
 
 func supportedGeneric(kind string) bool {
 	return kind == GenericParseNormalize || kind == GenericMappingTemplate || kind == GenericConditionFilter
+}
+
+func designModelAvailable(model domain.DataModelDefinition) bool {
+	return model.Status == "" || model.Status == domain.DefinitionPublished
+}
+
+func validateGenericNode(path string, node domain.FlowNode, catalog Catalog, add func(string, string, string)) {
+	if node.Generic == nil {
+		return
+	}
+	switch node.Generic.Type {
+	case GenericParseNormalize:
+		model := fixedModel(node.Generic.ParameterBindings, "model")
+		if model == "" {
+			add(path+".generic.parameter_bindings.model", "model_binding_required", "Parse/Normalize requires a fixed DataModel reference")
+			return
+		}
+		validateDesignModel(path+".generic.parameter_bindings.model", model, catalog, add)
+		if !hasModelPort(node.Outputs, model, domain.PortOutput) {
+			add(path+".outputs", "parse_output_model_mismatch", "Parse/Normalize output must expose its selected DataModel")
+		}
+	case GenericMappingTemplate:
+		model := fixedModel(node.Generic.ParameterBindings, "model")
+		if model == "" {
+			add(path+".generic.parameter_bindings.model", "model_binding_required", "Mapping/Template requires a fixed target DataModel reference")
+			return
+		}
+		validateDesignModel(path+".generic.parameter_bindings.model", model, catalog, add)
+		mapping, err := simulationMapping(node, model)
+		if err != nil {
+			add(path+".config.mapping", "mapping_invalid", err.Error())
+			return
+		}
+		validateMapping(path+".config.mapping", mapping, model, catalog, add)
+	case GenericConditionFilter:
+		if node.Config == nil {
+			add(path+".config.filter", "filter_required", "Condition/Filter requires a declarative filter")
+			return
+		}
+		if exclusive, ok := node.Config["mutually_exclusive"].(bool); ok && !exclusive {
+			add(path, "nonexclusive_condition", "Condition/Filter branches must be mutually exclusive")
+		}
+		filter, err := simulationFilter(node)
+		if err != nil {
+			add(path+".config.filter", "filter_invalid", err.Error())
+			return
+		}
+		if err := ValidateFilter(filter); err != nil {
+			add(path+".config.filter", "filter_invalid", err.Error())
+		}
+	}
+}
+
+func validateDesignModel(path, ref string, catalog Catalog, add func(string, string, string)) {
+	model, ok := catalog.Model(ref)
+	if !ok {
+		add(path, "model_not_found", "DataModel reference is not registered")
+		return
+	}
+	if !designModelAvailable(model) {
+		add(path, "model_unavailable", "DataModel version is not published")
+	}
+}
+
+func validateMapping(path string, mapping MappingSpec, model string, catalog Catalog, add func(string, string, string)) {
+	definition, ok := catalog.Model(model)
+	if !ok {
+		return
+	}
+	properties, _ := definition.Schema["properties"].(map[string]any)
+	for target, rule := range mapping {
+		if len(properties) != 0 {
+			if _, declared := properties[target]; !declared && !definition.AllowExtensions && !systemMappingField(model, target) {
+				add(path+"."+target, "mapping_field_not_declared", "mapping target is not declared by the DataModel")
+			}
+		}
+		operations := 0
+		if rule.Source != "" {
+			operations++
+			validateMappingReference(path+"."+target+".source", rule.Source, add)
+		}
+		if rule.Constant != nil {
+			operations++
+		}
+		if len(rule.Concat) != 0 {
+			operations++
+			for index, ref := range rule.Concat {
+				validateMappingReference(fmt.Sprintf("%s.%s.concat[%d]", path, target, index), ref, add)
+			}
+		}
+		if operations == 0 && rule.Default == nil {
+			add(path+"."+target, "mapping_operation_missing", "mapping needs a source, constant, concat, or default")
+		}
+		if operations > 1 {
+			add(path+"."+target, "mapping_operation_ambiguous", "mapping must declare one primary operation")
+		}
+	}
+}
+
+// The Multica action models carry a small platform metadata envelope alongside
+// the provider-facing fields.  These values are used for correlation and
+// projection description, not interpreted as arbitrary adapter parameters.
+func systemMappingField(model, field string) bool {
+	switch model {
+	case "MulticaCreateIssueInput.v1", "MulticaCreateIssueInput@v1":
+		switch field {
+		case "change_id", "branch", "branch_head_sha", "target_ref", "issue_iid":
+			return true
+		}
+	}
+	return false
+}
+
+func validateMappingReference(path, ref string, add func(string, string, string)) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		add(path, "mapping_reference_missing", "mapping reference cannot be empty")
+		return
+	}
+	if strings.HasPrefix(ref, "literal:") || strings.HasPrefix(ref, "$input.") {
+		return
+	}
+	switch ref {
+	case "$connection.source_project", "$connection.target_project", "$connection.target_ref",
+		"$runtime.workspace_id", "$runtime.connection_id", "$runtime.flow_execution_id", "$runtime.event_id":
+		return
+	default:
+		add(path, "mapping_reference_invalid", "mapping reference must use a declared input, Connection, runtime, or literal value")
+	}
 }
 
 func validateBindings(path string, bindings map[string]domain.ParameterBinding, add func(string, string, string)) {
