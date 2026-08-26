@@ -1256,6 +1256,10 @@ func (s *Server) replayExecution(w http.ResponseWriter, r *http.Request, session
 		writeError(w, err)
 		return
 	}
+	if version.Status != domain.FlowPublished {
+		writeError(w, fmt.Errorf("%w: replay requires a published FlowVersion", domain.ErrConflict))
+		return
+	}
 	event, err := store.GetInboundEvent(r.Context(), execution.WorkspaceID, execution.EventID)
 	if err != nil {
 		writeError(w, err)

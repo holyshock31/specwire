@@ -317,6 +317,7 @@ func (s *ConnectionService) Onboard(ctx context.Context, request OnboardingReque
 	} else {
 		label, err = s.gitlab.EnsureLabel(ctx, request.SourceGitLabInstance, sourceProject, "change", gitlabCredential)
 		if err != nil {
+			s.recordProviderEffect(ctx, request, "provider.gitlab.label.ensure", "connection", connection.ID, map[string]any{"provider": "gitlab", "operation": "ensure_label", "outcome": "failed", "error": safeMessage(err)})
 			return fail(err, domain.OnboardingFailed)
 		}
 		s.recordProviderEffect(ctx, request, "provider.gitlab.label.ensure", "connection", connection.ID, map[string]any{
@@ -350,6 +351,7 @@ func (s *ConnectionService) Onboard(ctx context.Context, request OnboardingReque
 	} else {
 		workspaceResource, err = s.multica.EnsureWorkspaceRepository(ctx, request.TargetMulticaInstance, request.TargetWorkspace, sourceProject, cloneURL, multicaCredential)
 		if err != nil {
+			s.recordProviderEffect(ctx, request, "provider.multica.workspace_repository.ensure", "connection", connection.ID, map[string]any{"provider": "multica", "operation": "ensure_workspace_repository", "outcome": "failed", "error": safeMessage(err)})
 			return fail(err, domain.OnboardingFailed)
 		}
 		s.recordProviderEffect(ctx, request, "provider.multica.workspace_repository.ensure", "connection", connection.ID, map[string]any{
@@ -372,6 +374,7 @@ func (s *ConnectionService) Onboard(ctx context.Context, request OnboardingReque
 	} else {
 		projectResource, err = s.multica.EnsureProjectResource(ctx, request.TargetMulticaInstance, targetProject, sourceProject, cloneURL, multicaCredential)
 		if err != nil {
+			s.recordProviderEffect(ctx, request, "provider.multica.project_resource.ensure", "connection", connection.ID, map[string]any{"provider": "multica", "operation": "ensure_project_resource", "outcome": "failed", "error": safeMessage(err)})
 			return fail(err, domain.OnboardingFailed)
 		}
 		s.recordProviderEffect(ctx, request, "provider.multica.project_resource.ensure", "connection", connection.ID, map[string]any{
@@ -484,6 +487,9 @@ func (s *ConnectionService) ensureTargetProject(ctx context.Context, request Onb
 	}
 	project, err := s.multica.CreateProject(ctx, request.TargetMulticaInstance, provider.CreateProjectInput{InstanceID: request.TargetMulticaInstance.ID, WorkspaceID: request.TargetWorkspace.ExternalID, Title: title, IdempotencyKey: string(operationID) + ":project"}, credential)
 	if err != nil {
+		s.recordProviderEffect(ctx, request, "provider.multica.project.create", "multica_project", operationID, map[string]any{
+			"provider": "multica", "operation": "create_project", "outcome": "failed", "idempotency_key": string(operationID) + ":project", "error": safeMessage(err),
+		})
 		return provider.MulticaProject{}, err
 	}
 	s.recordProviderEffect(ctx, request, "provider.multica.project.create", "multica_project", domain.ID(project.ExternalID), map[string]any{

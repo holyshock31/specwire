@@ -181,6 +181,9 @@ func (r *HookReconciler) ensureHook(ctx context.Context, connection domain.Conne
 	defer cleanup()
 	hookResult, err := r.gitlab.EnsureHook(ctx, gitlabInstance, providerProject, provider.HookSpec{URL: r.hookURLForInstance(project.InstanceID), Events: eventsForBehavior(behavior, input), SigningRef: signingRef, SigningToken: signingToken, ManagementMark: "specwire-managed"}, gitlabCredential)
 	if err != nil {
+		recordAudit(ctx, r.store, domain.AuditEvent{ID: domain.NewID(), WorkspaceID: connection.WorkspaceID, Action: "provider.gitlab.hook.ensure", EntityType: "connection", EntityID: connection.ID, Payload: map[string]any{
+			"workspace_id": connection.WorkspaceID, "provider": "gitlab", "operation": "ensure_hook", "outcome": "failed", "error": safeMessage(err),
+		}})
 		return domain.Hook{}, err
 	}
 	recordAudit(ctx, r.store, domain.AuditEvent{ID: domain.NewID(), WorkspaceID: connection.WorkspaceID, Action: "provider.gitlab.hook.ensure", EntityType: "connection", EntityID: connection.ID, Payload: map[string]any{
