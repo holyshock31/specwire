@@ -13,6 +13,7 @@ import (
 	"specwire/bridge/internal/domain"
 	"specwire/bridge/internal/flow"
 	"specwire/bridge/internal/provider"
+	runtimenew "specwire/bridge/internal/runtime"
 	"specwire/bridge/internal/security"
 )
 
@@ -56,6 +57,7 @@ type IntegrationServices struct {
 	Credentials *controlplane.CredentialService
 	Flows       *flow.Service
 	Registry    *controlplane.RegistryService
+	LiveTests   *runtimenew.LiveTestService
 }
 
 func (s *Server) handleIntegration(w http.ResponseWriter, r *http.Request, path string) bool {
@@ -766,6 +768,8 @@ func (s *Server) handleFlows(w http.ResponseWriter, r *http.Request, session dom
 		s.handleFlowValidate(w, r, store, item)
 	case "simulate":
 		s.handleFlowSimulate(w, r, session, store, item)
+	case "test":
+		s.handleFlowLiveTest(w, r, session, item)
 	case "publish":
 		s.handleFlowPublish(w, r, session, item)
 	case "pause":
@@ -970,6 +974,36 @@ func (s *Server) handleFlowSimulate(w http.ResponseWriter, r *http.Request, sess
 	}
 	s.audit(r.Context(), session.AccountID, "flow.simulate", "flow", item.ID, map[string]any{"workspace_id": item.WorkspaceID, "valid": result.Valid, "external_actions_suppressed": result.ExternalActionsSuppressed})
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleFlowLiveTest(w http.ResponseWriter, r *http.Request, session domain.Session, item domain.Flow) {
+	if r.Method != http.MethodPost || s.integration == nil || s.integration.LiveTests == nil || !s.checkCSRF(w, r, session) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+		}
+		return
+	}
+	var request struct {
+		SampleEvent        map[string]any `json:"sample_event,omitempty"`
+		ConfirmSideEffects bool           `json:"confirm_side_effects"`
+		FlowVersion        int            `json:"flow_version,omitempty"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	execution, err := s.integration.LiveTests.Start(r.Context(), item.WorkspaceID, item.ID, runtimenew.LiveTestRequest{
+		SampleEvent:        request.SampleEvent,
+		ConfirmSideEffects: request.ConfirmSideEffects,
+		FlowVersion:        request.FlowVersion,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r.Context(), session.AccountID, "flow.live_test", "flow_execution", execution.ID, map[string]any{
+		"workspace_id": item.WorkspaceID, "flow_id": item.ID, "flow_version": execution.FlowVersion, "side_effects_confirmed": true,
+	})
+	writeJSON(w, http.StatusAccepted, map[string]any{"execution": execution, "side_effects_confirmed": true})
 }
 
 func (s *Server) handleFlowPublish(w http.ResponseWriter, r *http.Request, session domain.Session, item domain.Flow) {

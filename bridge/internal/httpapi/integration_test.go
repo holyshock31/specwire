@@ -14,6 +14,7 @@ import (
 	"specwire/bridge/internal/domain"
 	"specwire/bridge/internal/flow"
 	"specwire/bridge/internal/registry"
+	runtimenew "specwire/bridge/internal/runtime"
 	"specwire/bridge/internal/security"
 	"specwire/bridge/internal/store"
 )
@@ -63,7 +64,11 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	flowService.SetCatalogResolver(registryService)
-	api.SetIntegrationServices(IntegrationServices{Store: db, Flows: flowService, Registry: registryService})
+	liveTests, err := runtimenew.NewLiveTestService(db, catalog, runtimenew.WithLiveTestCatalogResolver(registryService))
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.SetIntegrationServices(IntegrationServices{Store: db, Flows: flowService, Registry: registryService, LiveTests: liveTests})
 
 	server := httptest.NewServer(api)
 	defer server.Close()
@@ -155,6 +160,14 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(created.ID)+"/publish", "{}", csrf)
 	if status != http.StatusOK || !strings.Contains(body, `"version":`) {
 		t.Fatalf("publish Flow = %d %s", status, body)
+	}
+	status, _ = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(created.ID)+"/test", `{"confirm_side_effects":false}`, csrf)
+	if status != http.StatusBadRequest {
+		t.Fatalf("unconfirmed live test status = %d", status)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(created.ID)+"/test", `{"confirm_side_effects":true}`, csrf)
+	if status != http.StatusAccepted || !strings.Contains(body, `"side_effects_confirmed":true`) || !strings.Contains(body, `"live-test:`) {
+		t.Fatalf("live test = %d %s", status, body)
 	}
 	status, body = jsonRequest(t, client, http.MethodGet, base+"/flows/"+string(created.ID)+"/versions", "", nil)
 	if status != http.StatusOK || !strings.Contains(body, `"version":1`) {

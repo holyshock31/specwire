@@ -125,6 +125,11 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
+	liveTests, err := runtimenew.NewLiveTestService(store, catalog,
+		runtimenew.WithLiveTestCatalogResolver(registryService), runtimenew.WithLiveTestRetention(retention))
+	if err != nil {
+		return nil, err
+	}
 	worker, err := runtimenew.NewWorker(store, executor, "bridge-"+domain.NewID().String())
 	if err != nil {
 		return nil, err
@@ -137,7 +142,7 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
-	api.SetIntegrationServices(httpapi.IntegrationServices{Store: store, Selection: selection, Connections: connections, Credentials: credentialService, Flows: flows, Registry: registryService})
+	api.SetIntegrationServices(httpapi.IntegrationServices{Store: store, Selection: selection, Connections: connections, Credentials: credentialService, Flows: flows, Registry: registryService, LiveTests: liveTests})
 
 	// The old .env path is still required during this change's compatibility
 	// window.  Import it once per source project and make the persistent route

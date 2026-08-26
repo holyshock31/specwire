@@ -231,6 +231,67 @@ func TestIngressAcceptsAndDeduplicatesPublication(t *testing.T) {
 	}
 }
 
+func TestLiveTestRequiresConfirmationAndQueuesRedactedExecution(t *testing.T) {
+	db, catalog, _, _, _, workspaceID := openRuntime(t)
+	ctx := context.Background()
+	service, err := flow.NewService(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SeedBuiltins(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	item, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplatePublishChange, "1.0.0", "Live test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, item.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	liveTests, err := NewLiveTestService(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := liveTests.Start(ctx, workspaceID, item.ID, LiveTestRequest{}); err == nil {
+		t.Fatal("live test without confirmation must be rejected")
+	}
+	secretSample := map[string]any{
+		"object_kind": "issue",
+		"object_attributes": map[string]any{
+			"iid":         9,
+			"action":      "open",
+			"description": "change_id: LIVE-9\nbranch: live-test\nbranch_head_sha: sha-9",
+			"token":       "must-not-be-stored",
+		},
+		"token": "must-not-be-stored",
+	}
+	execution, err := liveTests.Start(ctx, workspaceID, item.ID, LiveTestRequest{SampleEvent: secretSample, ConfirmSideEffects: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(execution.DeliveryID, "live-test:") || execution.Status != domain.ExecutionQueued || execution.FlowVersion != 1 {
+		t.Fatalf("live test execution = %+v", execution)
+	}
+	event, err := db.GetInboundEvent(ctx, workspaceID, execution.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(event.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "must-not-be-stored") {
+		t.Fatalf("live test stored secret sample: %s", encoded)
+	}
+	jobs, err := db.ClaimNextJob(ctx, "live-test-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jobs.Payload["execution_id"] != string(execution.ID) {
+		t.Fatalf("live test job payload = %+v", jobs.Payload)
+	}
+}
+
 func TestIngressAndExecutorCompleteArchiveCorrelation(t *testing.T) {
 	db, catalog, vault, gitlab, multica, workspaceID := openRuntime(t)
 	ctx := context.Background()
