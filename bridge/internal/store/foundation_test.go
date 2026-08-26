@@ -69,8 +69,8 @@ func TestMigrationsAreVersionedAndIdempotent(t *testing.T) {
 	if err := first.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil {
 		t.Fatalf("schema_migrations: %v", err)
 	}
-	if migrations != 3 {
-		t.Fatalf("migrations = %d, want 3", migrations)
+	if migrations != 7 {
+		t.Fatalf("migrations = %d, want 7", migrations)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -83,8 +83,8 @@ func TestMigrationsAreVersionedAndIdempotent(t *testing.T) {
 	if err := second.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil {
 		t.Fatal(err)
 	}
-	if migrations != 3 {
-		t.Fatalf("migrations after reopen = %d, want 3", migrations)
+	if migrations != 7 {
+		t.Fatalf("migrations after reopen = %d, want 7", migrations)
 	}
 	var legacyConnectorTables int
 	if err := second.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'connector_instances'`).Scan(&legacyConnectorTables); err != nil {

@@ -87,6 +87,14 @@ func (s *Store) CreateGitLabGroupBinding(ctx context.Context, binding domain.Git
 	if binding.GitLabInstanceID.Empty() || strings.TrimSpace(binding.ExternalGroupID) == "" || strings.TrimSpace(binding.FullPath) == "" {
 		return fmt.Errorf("%w: GitLab group binding instance, external_group_id and full_path are required", domain.ErrInvalid)
 	}
+	var instanceWorkspace string
+	if err := s.db.QueryRowContext(ctx, `SELECT workspace_id FROM gitlab_instances WHERE id = ?`, binding.GitLabInstanceID).Scan(&instanceWorkspace); err == sql.ErrNoRows {
+		return fmt.Errorf("%w: GitLab instance %s", domain.ErrNotFound, binding.GitLabInstanceID)
+	} else if err != nil {
+		return fmt.Errorf("check GitLab group instance: %w", err)
+	} else if domain.ID(instanceWorkspace) != binding.WorkspaceID {
+		return fmt.Errorf("%w: GitLab group instance belongs to another workspace", domain.ErrForbidden)
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO gitlab_group_bindings
 		(id, workspace_id, gitlab_instance_id, external_group_id, full_path, credential_ref_id, credential_profile_id, inherit_subgroups, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, binding.ID, binding.WorkspaceID, binding.GitLabInstanceID,
@@ -308,6 +316,14 @@ func (s *Store) UpdateGitLabGroupCredential(ctx context.Context, workspaceID, bi
 	}
 	if ref.WorkspaceID != workspaceID {
 		return fmt.Errorf("%w: credential belongs to another workspace", domain.ErrForbidden)
+	}
+	var profileWorkspace string
+	if err := s.db.QueryRowContext(ctx, `SELECT workspace_id FROM credential_profiles WHERE id = ?`, profileID).Scan(&profileWorkspace); err == sql.ErrNoRows {
+		return fmt.Errorf("%w: credential profile %s", domain.ErrNotFound, profileID)
+	} else if err != nil {
+		return fmt.Errorf("check credential profile: %w", err)
+	} else if domain.ID(profileWorkspace) != workspaceID {
+		return fmt.Errorf("%w: credential profile belongs to another workspace", domain.ErrForbidden)
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE gitlab_group_bindings SET credential_ref_id = ?, credential_profile_id = ?
 		WHERE workspace_id = ? AND id = ?`, ref.ID, profileID, workspaceID, bindingID)

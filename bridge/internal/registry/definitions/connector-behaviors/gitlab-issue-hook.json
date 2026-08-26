@@ -5,6 +5,8 @@
   "version": "1.0.0",
   "display_name": "GitLab Issue Hook",
   "direction": "input",
+  "parameter_schema": {},
+  "output_model_ref": "provider:gitlab.issue.v1",
   "provider_event_schema": {
     "type": "object",
     "required": ["object_kind", "object_attributes", "project"]

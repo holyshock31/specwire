@@ -115,6 +115,26 @@ func (s *Store) CreateConnection(ctx context.Context, connection domain.Connecti
 	if err := connection.Validate(); err != nil {
 		return err
 	}
+	for _, endpoint := range []struct {
+		table string
+		id    domain.ID
+		name  string
+	}{
+		{table: "gitlab_instances", id: connection.SourceGitLabProject.InstanceID, name: "GitLab instance"},
+		{table: "multica_instances", id: connection.TargetMulticaProject.InstanceID, name: "Multica instance"},
+	} {
+		var endpointWorkspace string
+		err := s.db.QueryRowContext(ctx, `SELECT workspace_id FROM `+endpoint.table+` WHERE id = ?`, endpoint.id).Scan(&endpointWorkspace)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("%w: %s %s", domain.ErrNotFound, endpoint.name, endpoint.id)
+		}
+		if err != nil {
+			return fmt.Errorf("check %s workspace: %w", endpoint.name, err)
+		}
+		if domain.ID(endpointWorkspace) != connection.WorkspaceID {
+			return fmt.Errorf("%w: %s belongs to another workspace", domain.ErrForbidden, endpoint.name)
+		}
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO connections (
 		id, workspace_id, name,
 		source_gitlab_instance_id, source_project_external_id, source_project_path,
@@ -210,12 +230,76 @@ func (s *Store) CreateFlow(ctx context.Context, flow domain.Flow) error {
 	if strings.TrimSpace(flow.Name) == "" {
 		return fmt.Errorf("%w: flow name is required", domain.ErrInvalid)
 	}
+	// SQLite's single-column foreign key cannot express the workspace/connection
+	// pair, so enforce the pair explicitly before mutation.
+	var connectionWorkspace string
+	if err := s.db.QueryRowContext(ctx, `SELECT workspace_id FROM connections WHERE id = ?`, flow.ConnectionID).Scan(&connectionWorkspace); err == sql.ErrNoRows {
+		return fmt.Errorf("%w: connection %s", domain.ErrNotFound, flow.ConnectionID)
+	} else if err != nil {
+		return fmt.Errorf("check flow connection: %w", err)
+	} else if domain.ID(connectionWorkspace) != flow.WorkspaceID {
+		return fmt.Errorf("%w: flow connection belongs to another workspace", domain.ErrForbidden)
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO flows
 		(id, workspace_id, connection_id, name, description, status, active_version, created_by, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		flow.ID, flow.WorkspaceID, flow.ConnectionID, flow.Name, flow.Description,
 		flow.Status, flow.ActiveVersion, nullID(flow.CreatedBy), flow.UpdatedAt.Format(time.RFC3339Nano))
 	return constraintError("create flow", err)
+}
+
+func (s *Store) GetFlow(ctx context.Context, workspaceID, flowID domain.ID) (domain.Flow, error) {
+	var flow domain.Flow
+	var updated string
+	var createdBy sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, connection_id, name, description, status, active_version, created_by, updated_at
+		FROM flows WHERE workspace_id = ? AND id = ?`, workspaceID, flowID).Scan(
+		&flow.ID, &flow.WorkspaceID, &flow.ConnectionID, &flow.Name, &flow.Description, &flow.Status,
+		&flow.ActiveVersion, &createdBy, &updated)
+	if err == sql.ErrNoRows {
+		return domain.Flow{}, fmt.Errorf("%w: flow %s", domain.ErrNotFound, flowID)
+	}
+	if err != nil {
+		return domain.Flow{}, fmt.Errorf("get flow: %w", err)
+	}
+	if createdBy.Valid {
+		flow.CreatedBy = domain.ID(createdBy.String)
+	}
+	flow.UpdatedAt, err = decodeTime(updated)
+	if err != nil {
+		return domain.Flow{}, fmt.Errorf("decode flow updated_at: %w", err)
+	}
+	return flow, nil
+}
+
+func (s *Store) ListFlows(ctx context.Context, workspaceID, connectionID domain.ID) ([]domain.Flow, error) {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, workspace_id, connection_id, name, description, status, active_version, created_by, updated_at
+		FROM flows WHERE workspace_id = ? AND connection_id = ? ORDER BY name, id`, workspaceID, connectionID)
+	if err != nil {
+		return nil, fmt.Errorf("list flows: %w", err)
+	}
+	defer rows.Close()
+	var result []domain.Flow
+	for rows.Next() {
+		var flow domain.Flow
+		var createdBy sql.NullString
+		var updated string
+		if err := rows.Scan(&flow.ID, &flow.WorkspaceID, &flow.ConnectionID, &flow.Name, &flow.Description, &flow.Status, &flow.ActiveVersion, &createdBy, &updated); err != nil {
+			return nil, err
+		}
+		if createdBy.Valid {
+			flow.CreatedBy = domain.ID(createdBy.String)
+		}
+		flow.UpdatedAt, err = decodeTime(updated)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, flow)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) SaveFlowVersion(ctx context.Context, version domain.FlowVersion) error {
@@ -259,6 +343,14 @@ func (s *Store) SaveFlowVersion(ctx context.Context, version domain.FlowVersion)
 		return fmt.Errorf("begin save flow version: %w", err)
 	}
 	defer tx.Rollback()
+	var flowWorkspace string
+	if err := tx.QueryRowContext(ctx, `SELECT workspace_id FROM flows WHERE id = ?`, version.FlowID).Scan(&flowWorkspace); err == sql.ErrNoRows {
+		return fmt.Errorf("%w: flow %s", domain.ErrNotFound, version.FlowID)
+	} else if err != nil {
+		return fmt.Errorf("check flow workspace: %w", err)
+	} else if domain.ID(flowWorkspace) != version.WorkspaceID {
+		return fmt.Errorf("%w: flow belongs to another workspace", domain.ErrForbidden)
+	}
 
 	var existing struct {
 		ID, Status, Graph, Plan, Behaviors, Models string
@@ -349,6 +441,33 @@ func (s *Store) GetFlowVersion(ctx context.Context, workspaceID, flowID domain.I
 		return domain.FlowVersion{}, fmt.Errorf("decode flow published_at: %w", err)
 	}
 	return v, nil
+}
+
+func (s *Store) NextFlowVersion(ctx context.Context, workspaceID, flowID domain.ID) (int, error) {
+	var next int
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) + 1 FROM flow_versions WHERE workspace_id = ? AND flow_id = ?`, workspaceID, flowID).Scan(&next)
+	if err != nil {
+		return 0, fmt.Errorf("next flow version: %w", err)
+	}
+	return next, nil
+}
+
+func (s *Store) UpdateFlowStatus(ctx context.Context, workspaceID, flowID domain.ID, status domain.FlowStatus) error {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE flows SET status = ?, updated_at = ? WHERE workspace_id = ? AND id = ?`, status, nowText(), workspaceID, flowID)
+	if err != nil {
+		return fmt.Errorf("update flow status: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: flow %s", domain.ErrNotFound, flowID)
+	}
+	return nil
 }
 
 func requireWorkspaceID(workspaceID domain.ID) error {

@@ -76,8 +76,8 @@ func (s *CredentialService) BindGroupCredential(ctx context.Context, instance do
 	if err := s.vault.Put(ctx, ref, material); err != nil {
 		return domain.CredentialProfile{}, err
 	}
+	defer clear(material)
 	results, err := s.probeWithMaterial(ctx, instance, binding, material)
-	clear(material)
 	if err != nil {
 		return domain.CredentialProfile{}, err
 	}
@@ -111,8 +111,8 @@ func (s *CredentialService) RotateGroupCredential(ctx context.Context, instance 
 	if err := s.vault.Put(ctx, newRef, material); err != nil {
 		return domain.CredentialProfile{}, err
 	}
+	defer clear(material)
 	results, err := s.probeWithMaterial(ctx, instance, binding, material)
-	clear(material)
 	if err != nil {
 		return domain.CredentialProfile{}, err
 	}

@@ -170,6 +170,40 @@ type CapabilityResult struct {
 	RequestID  string `json:"request_id,omitempty"`
 }
 
+type OnboardingStatus string
+
+const (
+	OnboardingPending    OnboardingStatus = "pending"
+	OnboardingRunning    OnboardingStatus = "running"
+	OnboardingConfigured OnboardingStatus = "configured"
+	OnboardingReady      OnboardingStatus = "ready"
+	OnboardingBlocked    OnboardingStatus = "blocked"
+	OnboardingFailed     OnboardingStatus = "failed"
+)
+
+type OnboardingOperation struct {
+	ID            ID               `json:"id"`
+	WorkspaceID   ID               `json:"workspace_id"`
+	ConnectionID  ID               `json:"connection_id,omitempty"`
+	Status        OnboardingStatus `json:"status"`
+	Request       map[string]any   `json:"request"`
+	ErrorCategory string           `json:"error_category,omitempty"`
+	ErrorMessage  string           `json:"error_message,omitempty"`
+	CreatedAt     time.Time        `json:"created_at"`
+	UpdatedAt     time.Time        `json:"updated_at"`
+}
+
+type OnboardingCheckpoint struct {
+	ID          ID             `json:"id"`
+	WorkspaceID ID             `json:"workspace_id"`
+	OperationID ID             `json:"operation_id"`
+	Step        string         `json:"step"`
+	Status      string         `json:"status"`
+	ProviderID  string         `json:"provider_id,omitempty"`
+	Result      map[string]any `json:"result,omitempty"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
 // Workspace is the isolation boundary for all control-plane resources.
 type Workspace struct {
 	ID        ID              `json:"id"`
@@ -279,6 +313,26 @@ type ProviderProjectRef struct {
 	HTTPSURL   string `json:"https_url,omitempty"`
 }
 
+// MulticaWorkspaceRef and MulticaProjectRef keep provider identities together
+// with SpecWire's Workspace and instance identities.  They are selection
+// snapshots, not Flow connector instances.
+type MulticaWorkspaceRef struct {
+	ID          ID     `json:"id"`
+	WorkspaceID ID     `json:"workspace_id"`
+	InstanceID  ID     `json:"instance_id"`
+	ExternalID  string `json:"external_id"`
+	Name        string `json:"name"`
+}
+
+type MulticaProjectRef struct {
+	ID                 ID     `json:"id"`
+	WorkspaceID        ID     `json:"workspace_id"`
+	InstanceID         ID     `json:"instance_id"`
+	MulticaWorkspaceID ID     `json:"multica_workspace_id"`
+	ExternalID         string `json:"external_id"`
+	Title              string `json:"title"`
+}
+
 type Connection struct {
 	ID                   ID                 `json:"id"`
 	WorkspaceID          ID                 `json:"workspace_id"`
@@ -329,6 +383,18 @@ type ManagedResource struct {
 	ManagementMark string         `json:"management_mark,omitempty"`
 	Status         string         `json:"status"`
 	Snapshot       map[string]any `json:"snapshot,omitempty"`
+}
+
+type Hook struct {
+	ID                      ID           `json:"id"`
+	WorkspaceID             ID           `json:"workspace_id"`
+	ConnectionID            ID           `json:"connection_id"`
+	Provider                ProviderKind `json:"provider"`
+	InstanceID              ID           `json:"instance_id"`
+	SourceProjectExternalID string       `json:"source_project_external_id"`
+	ExternalID              string       `json:"external_id"`
+	SigningRef              *SecretRef   `json:"signing_ref,omitempty"`
+	Status                  HookStatus   `json:"status"`
 }
 
 type HookRoute struct {
@@ -457,6 +523,35 @@ type NodeExecution struct {
 	OutputSnapshot    map[string]any      `json:"output_snapshot,omitempty"`
 	ErrorCategory     string              `json:"error_category,omitempty"`
 	ProviderRequestID string              `json:"provider_request_id,omitempty"`
+}
+
+type InboundEvent struct {
+	ID                      ID             `json:"id"`
+	WorkspaceID             ID             `json:"workspace_id"`
+	ConnectionID            ID             `json:"connection_id"`
+	Provider                ProviderKind   `json:"provider"`
+	SourceInstanceID        ID             `json:"source_instance_id"`
+	SourceProjectExternalID string         `json:"source_project_external_id"`
+	BehaviorKey             string         `json:"behavior_key"`
+	BehaviorVersion         string         `json:"behavior_version"`
+	DeliveryID              string         `json:"delivery_id,omitempty"`
+	Payload                 map[string]any `json:"payload,omitempty"`
+	PayloadHash             string         `json:"payload_hash"`
+	ReceivedAt              time.Time      `json:"received_at"`
+}
+
+type Job struct {
+	ID           ID             `json:"id"`
+	WorkspaceID  ID             `json:"workspace_id"`
+	Kind         string         `json:"kind"`
+	Payload      map[string]any `json:"payload"`
+	AvailableAt  time.Time      `json:"available_at"`
+	LeaseUntil   *time.Time     `json:"lease_until,omitempty"`
+	LeasedBy     string         `json:"leased_by,omitempty"`
+	AttemptCount int            `json:"attempt_count"`
+	Status       string         `json:"status"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }
 
 type AuditEvent struct {

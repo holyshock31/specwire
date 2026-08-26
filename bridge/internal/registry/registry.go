@@ -21,6 +21,28 @@ type Bundle struct {
 	DataModels     []domain.DataModelDefinition `json:"data_models"`
 }
 
+type AdapterAllowlist map[string]bool
+
+func (a AdapterAllowlist) IsAllowlisted(operation string) bool { return a[operation] }
+
+type AdapterCatalog interface{ IsAllowlisted(string) bool }
+
+func ValidateBehavior(item domain.ConnectorBehavior, adapters AdapterCatalog) error {
+	if strings.TrimSpace(item.Key) == "" || strings.TrimSpace(item.Version) == "" || strings.TrimSpace(item.AdapterOperation) == "" {
+		return fmt.Errorf("%w: behavior key, version and adapter operation are required", domain.ErrInvalid)
+	}
+	if item.Direction != domain.DirectionInput && item.Direction != domain.DirectionOutput {
+		return fmt.Errorf("%w: behavior direction is invalid", domain.ErrInvalid)
+	}
+	if item.ParameterSchema == nil {
+		item.ParameterSchema = map[string]any{}
+	}
+	if adapters == nil || !adapters.IsAllowlisted(item.AdapterOperation) {
+		return fmt.Errorf("%w: adapter operation %s is not deployed and allowlisted", domain.ErrForbidden, item.AdapterOperation)
+	}
+	return nil
+}
+
 func (b Bundle) Validate() error {
 	seenTypes := map[string]struct{}{}
 	for _, item := range b.ConnectorTypes {

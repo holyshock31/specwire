@@ -17,7 +17,7 @@
 - [x] 2.3 Implement `admin`, scoped `operator`, and `viewer` authorization checks for Connection, Flow, credential, provider, execution, replay, and audit operations; reject custom roles and `connector_admin` configuration.
 - [x] 2.4 Add APIs for administrators to create, test, disable, and list Workspace-owned GitLab and Multica endpoint profiles with stable internal IDs, optional Multica management capability/credential references, and redacted credential references; do not model runtime `glab` checkout credentials.
 - [x] 2.5 Add GitLab Group credential binding with PAT/Group Access Token profiles, subgroup inheritance, capability checks, safe rotation, and provider-fake tests for missing permissions and transient failures.
-- [ ] 2.6 Add authorization tests for multi-Workspace accounts, Group/subgroup scope, provider capability checks using configured credentials rather than login impersonation, viewer read-only behavior, credential access, replay authorization, and cross-Workspace ID probing.
+- [x] 2.6 Add authorization tests for multi-Workspace accounts, Group/subgroup scope, provider capability checks using configured credentials rather than login impersonation, viewer read-only behavior, credential access, replay authorization, and cross-Workspace ID probing.
 
 ## 3. Connection onboarding and shared provider resources
 

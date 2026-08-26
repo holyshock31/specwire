@@ -5,6 +5,11 @@
   "version": "1.0.0",
   "display_name": "Multica Complete Issue",
   "direction": "output",
+  "parameter_schema": {
+    "type": "object",
+    "properties": {"project": {"type": "string", "binding_kinds": ["connection_ref"]}},
+    "required": ["project"]
+  },
   "input_model_ref": "MulticaCompleteIssueInput.v1",
   "required_capabilities": ["multica.issue.update"],
   "adapter_operation": "multica.issue.status",

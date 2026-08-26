@@ -64,6 +64,14 @@ func (s *Store) GrantRole(ctx context.Context, binding domain.ScopedRoleBinding)
 	if binding.ScopeType == "workspace" {
 		binding.ScopeID = ""
 	}
+	var membershipWorkspace string
+	if err := s.db.QueryRowContext(ctx, `SELECT workspace_id FROM workspace_memberships WHERE id = ?`, binding.MembershipID).Scan(&membershipWorkspace); err == sql.ErrNoRows {
+		return fmt.Errorf("%w: membership %s", domain.ErrNotFound, binding.MembershipID)
+	} else if err != nil {
+		return fmt.Errorf("check role membership: %w", err)
+	} else if domain.ID(membershipWorkspace) != binding.WorkspaceID {
+		return fmt.Errorf("%w: role membership belongs to another workspace", domain.ErrForbidden)
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO scoped_role_bindings
 		(id, workspace_id, membership_id, role, scope_type, scope_id) VALUES (?, ?, ?, ?, ?, ?)`,
 		binding.ID, binding.WorkspaceID, binding.MembershipID, binding.Role, binding.ScopeType, nullID(binding.ScopeID))
