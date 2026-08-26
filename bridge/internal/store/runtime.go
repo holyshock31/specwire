@@ -217,6 +217,98 @@ func (s *Store) GetInboundEventByDelivery(ctx context.Context, workspaceID, sour
 }
 
 func (s *Store) CreateFlowExecution(ctx context.Context, execution domain.FlowExecution) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.insertFlowExecutionTx(ctx, tx, execution); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CreateFlowExecutionAndEnqueue commits the execution and its first job as a
+// single unit.  A queued execution without a job is not recoverable by the
+// worker, so replay must not expose that intermediate state.
+func (s *Store) CreateFlowExecutionAndEnqueue(ctx context.Context, execution domain.FlowExecution, job domain.Job) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.insertFlowExecutionTx(ctx, tx, execution); err != nil {
+		return err
+	}
+	if err := s.insertJobTx(ctx, tx, job); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RequeueFlowExecution atomically transitions a retryable execution back to
+// queued and creates its job.  The status predicate makes concurrent operator
+// retries converge on one winner instead of producing duplicate work.
+func (s *Store) RequeueFlowExecution(ctx context.Context, execution domain.FlowExecution, job domain.Job) error {
+	if execution.Status != domain.ExecutionQueued {
+		return fmt.Errorf("%w: requeued execution must have queued status", domain.ErrInvalid)
+	}
+	if err := requireWorkspaceID(execution.WorkspaceID); err != nil {
+		return err
+	}
+	if job.WorkspaceID.Empty() {
+		job.WorkspaceID = execution.WorkspaceID
+	}
+	if job.WorkspaceID != execution.WorkspaceID {
+		return fmt.Errorf("%w: retry job workspace mismatch", domain.ErrInvalid)
+	}
+	providerIDs, err := marshalJSON(execution.ProviderRequestIDs, "[]")
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now().UTC()
+	result, err := tx.ExecContext(ctx, `UPDATE flow_executions
+		SET status = ?, current_node_id = ?, provider_request_ids_json = ?, error_category = ?, error_message = ?, updated_at = ?
+		WHERE workspace_id = ? AND id = ? AND status IN (?, ?, ?)`,
+		domain.ExecutionQueued, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), now.Format(time.RFC3339Nano),
+		execution.WorkspaceID, execution.ID, domain.ExecutionFailed, domain.ExecutionIndeterminate, domain.ExecutionReconciliationNeeded)
+	if err != nil {
+		return fmt.Errorf("requeue FlowExecution: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected == 0 {
+		var status string
+		err := tx.QueryRowContext(ctx, `SELECT status FROM flow_executions WHERE workspace_id = ? AND id = ?`, execution.WorkspaceID, execution.ID).Scan(&status)
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("%w: FlowExecution %s", domain.ErrNotFound, execution.ID)
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: FlowExecution %s is %s and cannot be retried", domain.ErrConflict, execution.ID, status)
+	}
+	if err := s.insertJobTx(ctx, tx, job); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) insertFlowExecutionTx(ctx context.Context, tx *sql.Tx, execution domain.FlowExecution) error {
 	if execution.ID.Empty() || execution.EventID.Empty() || execution.FlowVersionID.Empty() || execution.ConnectionID.Empty() || execution.FlowID.Empty() || strings.TrimSpace(execution.IdempotencyKey) == "" || strings.TrimSpace(execution.CorrelationID) == "" {
 		return fmt.Errorf("%w: incomplete FlowExecution", domain.ErrInvalid)
 	}
@@ -237,21 +329,21 @@ func (s *Store) CreateFlowExecution(ctx context.Context, execution domain.FlowEx
 		return err
 	}
 	var flowWorkspace, versionWorkspace string
-	if err := s.db.QueryRowContext(ctx, `SELECT workspace_id FROM flows WHERE id = ?`, execution.FlowID).Scan(&flowWorkspace); err == sql.ErrNoRows {
+	if err := tx.QueryRowContext(ctx, `SELECT workspace_id FROM flows WHERE id = ?`, execution.FlowID).Scan(&flowWorkspace); err == sql.ErrNoRows {
 		return fmt.Errorf("%w: flow %s", domain.ErrNotFound, execution.FlowID)
 	} else if err != nil {
 		return err
 	} else if domain.ID(flowWorkspace) != execution.WorkspaceID {
 		return fmt.Errorf("%w: execution Flow belongs to another workspace", domain.ErrForbidden)
 	}
-	if err := s.db.QueryRowContext(ctx, `SELECT workspace_id FROM flow_versions WHERE id = ? AND flow_id = ?`, execution.FlowVersionID, execution.FlowID).Scan(&versionWorkspace); err == sql.ErrNoRows {
+	if err := tx.QueryRowContext(ctx, `SELECT workspace_id FROM flow_versions WHERE id = ? AND flow_id = ?`, execution.FlowVersionID, execution.FlowID).Scan(&versionWorkspace); err == sql.ErrNoRows {
 		return fmt.Errorf("%w: FlowVersion %s", domain.ErrNotFound, execution.FlowVersionID)
 	} else if err != nil {
 		return err
 	} else if domain.ID(versionWorkspace) != execution.WorkspaceID {
 		return fmt.Errorf("%w: execution FlowVersion belongs to another workspace", domain.ErrForbidden)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO flow_executions
+	_, err = tx.ExecContext(ctx, `INSERT INTO flow_executions
 		(id, workspace_id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, execution.ID, execution.WorkspaceID, execution.ConnectionID, execution.FlowID, execution.FlowVersionID, execution.FlowVersion, execution.EventID, execution.DeliveryID, execution.IdempotencyKey, execution.CorrelationID, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, execution.ErrorMessage, execution.CreatedAt.Format(time.RFC3339Nano), execution.UpdatedAt.Format(time.RFC3339Nano))
 	return constraintError("create FlowExecution", err)
@@ -419,6 +511,21 @@ func (s *Store) ListNodeExecutions(ctx context.Context, workspaceID, executionID
 }
 
 func (s *Store) EnqueueJob(ctx context.Context, job domain.Job) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.insertJobTx(ctx, tx, job); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) insertJobTx(ctx context.Context, tx *sql.Tx, job domain.Job) error {
 	if job.ID.Empty() {
 		job.ID = domain.NewID()
 	}
@@ -444,7 +551,7 @@ func (s *Store) EnqueueJob(ctx context.Context, job domain.Job) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO jobs
+	_, err = tx.ExecContext(ctx, `INSERT INTO jobs
 		(id, workspace_id, kind, payload_json, available_at, lease_until, leased_by, attempt_count, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, job.ID, job.WorkspaceID, job.Kind, payload, job.AvailableAt.Format(time.RFC3339Nano), formatOptionalTime(job.LeaseUntil), job.LeasedBy, job.AttemptCount, job.Status, job.CreatedAt.Format(time.RFC3339Nano), job.UpdatedAt.Format(time.RFC3339Nano))
 	return constraintError("enqueue job", err)

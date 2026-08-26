@@ -44,7 +44,9 @@ type IntegrationStore interface {
 	ListNodeExecutions(context.Context, domain.ID, domain.ID) ([]domain.NodeExecution, error)
 	GetInboundEvent(context.Context, domain.ID, domain.ID) (domain.InboundEvent, error)
 	CreateFlowExecution(context.Context, domain.FlowExecution) error
+	CreateFlowExecutionAndEnqueue(context.Context, domain.FlowExecution, domain.Job) error
 	UpdateFlowExecution(context.Context, domain.FlowExecution) error
+	RequeueFlowExecution(context.Context, domain.FlowExecution, domain.Job) error
 	EnqueueJob(context.Context, domain.Job) error
 	ListAuditEvents(context.Context, domain.ID, string, domain.ID, int) ([]domain.AuditEvent, error)
 	CreateAuditEvent(context.Context, domain.AuditEvent) error
@@ -1220,12 +1222,8 @@ func (s *Server) retryExecution(w http.ResponseWriter, r *http.Request, session 
 	execution.Status = domain.ExecutionQueued
 	execution.ErrorCategory = ""
 	execution.ErrorMessage = ""
-	if err := store.UpdateFlowExecution(r.Context(), execution); err != nil {
-		writeError(w, err)
-		return
-	}
 	job := domain.Job{ID: domain.NewID(), WorkspaceID: execution.WorkspaceID, Kind: "flow.retry", Payload: map[string]any{"execution_id": execution.ID, "connection_id": execution.ConnectionID}}
-	if err := store.EnqueueJob(r.Context(), job); err != nil {
+	if err := store.RequeueFlowExecution(r.Context(), execution, job); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -1267,12 +1265,8 @@ func (s *Server) replayExecution(w http.ResponseWriter, r *http.Request, session
 	}
 	replayID := domain.NewID()
 	replay := domain.FlowExecution{ID: replayID, WorkspaceID: execution.WorkspaceID, ConnectionID: execution.ConnectionID, FlowID: execution.FlowID, FlowVersionID: version.ID, FlowVersion: version.Version, EventID: event.ID, DeliveryID: event.DeliveryID + "#replay-" + string(replayID), IdempotencyKey: "replay:" + string(replayID), CorrelationID: "replay:" + string(replayID), Status: domain.ExecutionQueued}
-	if err := store.CreateFlowExecution(r.Context(), replay); err != nil {
-		writeError(w, err)
-		return
-	}
 	job := domain.Job{ID: domain.NewID(), WorkspaceID: replay.WorkspaceID, Kind: "flow.execute", Payload: map[string]any{"execution_id": replay.ID, "connection_id": replay.ConnectionID}}
-	if err := store.EnqueueJob(r.Context(), job); err != nil {
+	if err := store.CreateFlowExecutionAndEnqueue(r.Context(), replay, job); err != nil {
 		writeError(w, err)
 		return
 	}
