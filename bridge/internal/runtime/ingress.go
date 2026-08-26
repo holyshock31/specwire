@@ -396,7 +396,7 @@ func parseDescriptionFields(description string) map[string]string {
 }
 
 func idempotencyKey(route domain.HookRoute, connection domain.Connection, action string) string {
-	return digest("idempotency", string(route.WorkspaceID), string(connection.ID), string(connection.SourceGitLabProject.InstanceID), connection.SourceGitLabProject.ExternalID, route.BehaviorKey, route.BehaviorVersion, action, string(connection.TargetMulticaProject.InstanceID), connection.TargetMulticaProject.ExternalID)
+	return digest("idempotency", string(route.WorkspaceID), string(connection.ID), string(route.FlowID), strconv.Itoa(route.FlowVersion), string(connection.SourceGitLabProject.InstanceID), connection.SourceGitLabProject.ExternalID, route.BehaviorKey, route.BehaviorVersion, action, string(connection.TargetMulticaProject.InstanceID), connection.TargetMulticaProject.ExternalID)
 }
 
 func correlationID(route domain.HookRoute, action string) string {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -71,8 +72,9 @@ func (f *runtimeGitLabFake) CloseIssue(_ context.Context, _ domain.GitLabInstanc
 }
 
 type runtimeMulticaFake struct {
-	created  []provider.IssueInput
-	statuses []string
+	created   []provider.IssueInput
+	statuses  []string
+	createErr error
 }
 
 func (f *runtimeMulticaFake) ListWorkspaces(context.Context, domain.MulticaInstance, string, *provider.Credential) ([]provider.MulticaWorkspace, error) {
@@ -91,6 +93,9 @@ func (f *runtimeMulticaFake) EnsureProjectResource(context.Context, domain.Multi
 	return provider.ResourceResult{}, nil
 }
 func (f *runtimeMulticaFake) CreateIssue(_ context.Context, _ domain.MulticaInstance, input provider.IssueInput, _ *provider.Credential) (provider.IssueResult, error) {
+	if f.createErr != nil {
+		return provider.IssueResult{}, f.createErr
+	}
 	f.created = append(f.created, input)
 	return provider.IssueResult{IssueID: "issue-runtime", ProjectID: input.ProjectID, Created: true, RequestID: "multica-create-1"}, nil
 }
@@ -222,7 +227,7 @@ func TestIngressAcceptsAndDeduplicatesPublication(t *testing.T) {
 	if err := executor.Execute(ctx, workspaceID, executions[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if len(multica.created) != 1 || multica.created[0].ProjectID != "target-1" || multica.created[0].Title != "[SpecWire] CHG-7" {
+	if len(multica.created) != 1 || multica.created[0].ProjectID != "target-1" || multica.created[0].Title != "[SpecWire] CHG-7" || !strings.Contains(multica.created[0].Description, "branch_head_sha: abc123") {
 		t.Fatalf("created=%+v", multica.created)
 	}
 	audits, err := db.ListAuditEvents(ctx, workspaceID, "flow_execution", executions[0].ID, 20)
@@ -391,6 +396,237 @@ func TestIngressAndExecutorCompleteArchiveCorrelation(t *testing.T) {
 	}
 	if len(gitlab.closed) != 1 || gitlab.closed[0] != 8 {
 		t.Fatalf("closed issues=%v", gitlab.closed)
+	}
+}
+
+func TestIngressDeliversOneDeliveryToEveryMatchingPublishedFlow(t *testing.T) {
+	db, catalog, vault, gitlab, multica, workspaceID := openRuntime(t)
+	ctx := context.Background()
+	reconciler, err := controlplane.NewHookReconciler(db, gitlab, vault, catalog, "https://specwire.example/gitlab/specwire?instance_id=gitlab-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := flow.NewService(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetRouteActivator(reconciler)
+	if err := service.SeedBuiltins(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplatePublishChange, "1.0.0", "Publish one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplatePublishChange, "1.0.0", "Publish two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, first.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, second.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	hook, err := db.GetHookByProject(ctx, workspaceID, "gitlab-runtime", "101")
+	if err != nil || hook.SigningRef == nil {
+		t.Fatalf("hook = %+v, err=%v", hook, err)
+	}
+	secret, err := vault.Resolve(ctx, *hook.SigningRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"object_kind":"issue","object_attributes":{"iid":17,"action":"open","description":"change_id: CHG-17\nbranch: change/17\nbranch_head_sha: frozen-17\n","labels":[{"title":"change"}]},"project":{"id":101,"path_with_namespace":"platform/service"}}`)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	request := httptest.NewRequest(http.MethodPost, "/gitlab/specwire?instance_id=gitlab-runtime", strings.NewReader(string(body)))
+	request.Header.Set("X-Gitlab-Event", "Issue Hook")
+	request.Header.Set("webhook-id", "delivery-multiple-flows")
+	request.Header.Set("webhook-timestamp", timestamp)
+	request.Header.Set("webhook-signature", sign(secret, "delivery-multiple-flows", timestamp, body))
+	clearBytes(secret)
+	response := httptest.NewRecorder()
+	ingress, err := NewIngress(db, vault, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("ingress status=%d body=%s", response.Code, response.Body.String())
+	}
+	var result IngressResult
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Accepted != 2 || result.Duplicates != 0 {
+		t.Fatalf("ingress result=%+v", result)
+	}
+	firstExecutions, err := db.ListFlowExecutions(ctx, workspaceID, "connection-runtime", first.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondExecutions, err := db.ListFlowExecutions(ctx, workspaceID, "connection-runtime", second.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstExecutions) != 1 || len(secondExecutions) != 1 {
+		t.Fatalf("flow executions = first:%d second:%d", len(firstExecutions), len(secondExecutions))
+	}
+	executor, err := NewExecutor(db, gitlab, multica, vault, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.Execute(ctx, workspaceID, firstExecutions[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.Execute(ctx, workspaceID, secondExecutions[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(multica.created) != 1 {
+		t.Fatalf("same source identity should produce one projection, got %d", len(multica.created))
+	}
+}
+
+func TestArchiveBeforePublicationRequiresReconciliation(t *testing.T) {
+	db, catalog, vault, gitlab, multica, workspaceID := openRuntime(t)
+	ctx := context.Background()
+	reconciler, err := controlplane.NewHookReconciler(db, gitlab, vault, catalog, "https://specwire.example/gitlab/specwire?instance_id=gitlab-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := flow.NewService(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetRouteActivator(reconciler)
+	if err := service.SeedBuiltins(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplateCompleteArchive, "1.0.0", "Archive first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, archive.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	hook, err := db.GetHookByProject(ctx, workspaceID, "gitlab-runtime", "101")
+	if err != nil || hook.SigningRef == nil {
+		t.Fatalf("hook = %+v, err=%v", hook, err)
+	}
+	secret, err := vault.Resolve(ctx, *hook.SigningRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"ref":"refs/heads/main","after":"archive-sha","head_commit":{"id":"archive-sha","message":"archive\n\nSpecWire-Event: archived\nSpecWire-Change: MISSING-1"},"project":{"id":101,"path_with_namespace":"platform/service"}}`)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	request := httptest.NewRequest(http.MethodPost, "/gitlab/specwire?instance_id=gitlab-runtime", strings.NewReader(string(body)))
+	request.Header.Set("X-Gitlab-Event", "Push Hook")
+	request.Header.Set("webhook-id", "delivery-archive-before-publication")
+	request.Header.Set("webhook-timestamp", timestamp)
+	request.Header.Set("webhook-signature", sign(secret, "delivery-archive-before-publication", timestamp, body))
+	clearBytes(secret)
+	response := httptest.NewRecorder()
+	ingress, err := NewIngress(db, vault, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress.ServeHTTP(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("ingress status=%d body=%s", response.Code, response.Body.String())
+	}
+	executions, err := db.ListFlowExecutions(ctx, workspaceID, "connection-runtime", archive.ID, 10)
+	if err != nil || len(executions) != 1 {
+		t.Fatalf("archive executions=%d err=%v", len(executions), err)
+	}
+	executor, err := NewExecutor(db, gitlab, multica, vault, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executionErr := executor.Execute(ctx, workspaceID, executions[0].ID)
+	if executionErr == nil || !errors.Is(executionErr, domain.ErrNotFound) {
+		t.Fatalf("archive without correlation error=%v, want reconciliation/not-found", executionErr)
+	}
+	stored, err := db.GetFlowExecution(ctx, workspaceID, executions[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.ExecutionReconciliationNeeded || stored.ErrorCategory != "reconciliation-required" {
+		t.Fatalf("stored execution=%+v", stored)
+	}
+	nodes, err := db.ListNodeExecutions(ctx, workspaceID, executions[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completionNode *domain.NodeExecution
+	for index := range nodes {
+		if nodes[index].NodeID == "multica-complete" {
+			completionNode = &nodes[index]
+			break
+		}
+	}
+	if completionNode == nil || completionNode.Status != domain.NodeIndeterminate {
+		t.Fatalf("archive node checkpoints=%+v", nodes)
+	}
+	if len(multica.statuses) != 0 {
+		t.Fatalf("missing correlation must not call Multica: %v", multica.statuses)
+	}
+}
+
+func TestProviderTimeoutMarksExecutionIndeterminate(t *testing.T) {
+	db, catalog, vault, gitlab, multica, workspaceID := openRuntime(t)
+	ctx := context.Background()
+	service, err := flow.NewService(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SeedBuiltins(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	publication, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplatePublishChange, "1.0.0", "Timeout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, _, err := service.Publish(ctx, workspaceID, publication.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.InboundEvent{ID: "event-provider-timeout", WorkspaceID: workspaceID, ConnectionID: "connection-runtime", Provider: domain.ProviderGitLab, SourceInstanceID: "gitlab-runtime", SourceProjectExternalID: "101", BehaviorKey: "gitlab.issue-hook", BehaviorVersion: "1.0.0", DeliveryID: "delivery-provider-timeout", Payload: map[string]any{
+		"object_kind":       "issue",
+		"object_attributes": map[string]any{"iid": 19, "action": "open", "description": "change_id: TIMEOUT-19\nbranch: timeout\nbranch_head_sha: sha-timeout", "labels": []any{map[string]any{"title": "change"}}},
+		"project":           map[string]any{"id": 101, "path_with_namespace": "platform/service"},
+	}}
+	execution := domain.FlowExecution{ID: "execution-provider-timeout", WorkspaceID: workspaceID, ConnectionID: "connection-runtime", FlowID: publication.ID, FlowVersionID: version.ID, FlowVersion: version.Version, DeliveryID: event.DeliveryID, IdempotencyKey: "idempotency-provider-timeout", CorrelationID: "correlation-provider-timeout", Status: domain.ExecutionQueued}
+	job := domain.Job{ID: "job-provider-timeout", WorkspaceID: workspaceID, Kind: JobKindFlowExecute, Payload: map[string]any{"execution_id": execution.ID, "connection_id": execution.ConnectionID}}
+	if _, created, err := db.AcceptInboundEvent(ctx, event, execution, job); err != nil || !created {
+		t.Fatalf("accept timeout execution: created=%v err=%v", created, err)
+	}
+	multica.createErr = &provider.ProviderError{Provider: domain.ProviderMultica, Operation: "create issue", Category: provider.ErrorTimeout, Err: errors.New("provider deadline exceeded")}
+	executor, err := NewExecutor(db, gitlab, multica, vault, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executionErr := executor.Execute(ctx, workspaceID, execution.ID); executionErr == nil {
+		t.Fatal("provider timeout must fail the execution")
+	}
+	stored, err := db.GetFlowExecution(ctx, workspaceID, execution.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.ExecutionReconciliationNeeded || stored.ErrorCategory != string(provider.ErrorTimeout) {
+		t.Fatalf("stored timeout execution=%+v", stored)
+	}
+	nodes, err := db.ListNodeExecutions(ctx, workspaceID, execution.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outputNode *domain.NodeExecution
+	for index := range nodes {
+		if nodes[index].NodeID == "multica-create" {
+			outputNode = &nodes[index]
+			break
+		}
+	}
+	if outputNode == nil || outputNode.Status != domain.NodeIndeterminate || outputNode.ErrorCategory != string(provider.ErrorTimeout) {
+		t.Fatalf("timeout node checkpoints=%+v", nodes)
 	}
 }
 
