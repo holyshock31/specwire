@@ -37,12 +37,13 @@ func (f *onboardingGitLabFake) CloseIssue(context.Context, domain.GitLabInstance
 }
 
 type onboardingMulticaFake struct {
-	projects           []provider.MulticaProject
-	created            int
-	workspaceResources int
-	projectResources   int
-	lastCloneURL       string
-	readiness          provider.ReadinessResult
+	projects              []provider.MulticaProject
+	created               int
+	workspaceResources    int
+	projectResources      int
+	lastCloneURL          string
+	readiness             provider.ReadinessResult
+	projectResourceErrors []error
 }
 
 func (f *onboardingMulticaFake) ListWorkspaces(context.Context, domain.MulticaInstance, string, *provider.Credential) ([]provider.MulticaWorkspace, error) {
@@ -69,6 +70,11 @@ func (f *onboardingMulticaFake) EnsureWorkspaceRepository(_ context.Context, _ d
 }
 func (f *onboardingMulticaFake) EnsureProjectResource(_ context.Context, _ domain.MulticaInstance, _ provider.MulticaProject, project provider.GitLabProject, cloneURL string, _ *provider.Credential) (provider.ResourceResult, error) {
 	f.projectResources++
+	if len(f.projectResourceErrors) > 0 {
+		err := f.projectResourceErrors[0]
+		f.projectResourceErrors = f.projectResourceErrors[1:]
+		return provider.ResourceResult{}, err
+	}
 	f.lastCloneURL = cloneURL
 	return provider.ResourceResult{Kind: domain.ResourceProject, ExternalID: "project-resource-1", Created: f.projectResources == 1, Adopted: f.projectResources > 1, Ownership: func() domain.Ownership {
 		if f.projectResources == 1 {
@@ -223,5 +229,62 @@ func TestConnectionOnboardingConflictDoesNotCreateTarget(t *testing.T) {
 	}
 	if multica.created != 0 {
 		t.Fatalf("target project was created despite conflict: %d", multica.created)
+	}
+}
+
+func TestConnectionOnboardingResumesAfterPartialResourceFailure(t *testing.T) {
+	s, err := store.Open(t.TempDir() + "/onboarding-resume.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	workspaceID := domain.ID("workspace-resume")
+	if err := s.CreateWorkspace(ctx, domain.Workspace{ID: workspaceID, Slug: "resume", Name: "Resume", Status: domain.WorkspaceActive}); err != nil {
+		t.Fatal(err)
+	}
+	gitlabInstance := domain.GitLabInstance{ID: "gitlab-resume", WorkspaceID: workspaceID, Name: "GitLab", BaseURL: "https://gitlab.example.test"}
+	multicaInstance := domain.MulticaInstance{ID: "multica-resume", WorkspaceID: workspaceID, Name: "Multica", BaseURL: "https://multica.example.test"}
+	if err := s.CreateGitLabInstance(ctx, gitlabInstance); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateMulticaInstance(ctx, multicaInstance); err != nil {
+		t.Fatal(err)
+	}
+	gitlab := &onboardingGitLabFake{project: provider.GitLabProject{InstanceID: gitlabInstance.ID, ExternalID: "source-resume", GroupID: "group-resume", FullPath: "platform/resume", Name: "resume", WebURL: "https://gitlab.example/platform/resume", SSHURL: "git@gitlab.example:platform/resume.git", HTTPSURL: "https://gitlab.example/platform/resume.git"}}
+	multica := &onboardingMulticaFake{readiness: provider.ReadinessResult{Ready: true}, projectResourceErrors: []error{errors.New("project resource temporarily unavailable")}}
+	service, err := NewConnectionService(s, gitlab, multica, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := OnboardingRequest{OperationID: "onboarding-resume-operation", WorkspaceID: workspaceID, SourceGitLabInstance: gitlabInstance, SourceProjectExternalID: "source-resume", TargetMulticaInstance: multicaInstance, TargetWorkspace: provider.MulticaWorkspace{InstanceID: multicaInstance.ID, ExternalID: "workspace-resume", Name: "Team"}, CreateTargetProject: true, PreferSSH: true}
+	if _, err := service.Onboard(ctx, request); err == nil {
+		t.Fatal("first onboarding should report the partial provider failure")
+	}
+	operation, err := s.GetOnboardingOperation(ctx, workspaceID, request.OperationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.Status != domain.OnboardingFailed || operation.ConnectionID.Empty() {
+		t.Fatalf("partial operation = %+v", operation)
+	}
+	partial, err := s.ListManagedResources(ctx, workspaceID, operation.ConnectionID)
+	if err != nil || len(partial) != 2 {
+		t.Fatalf("partial resources = %d, %v; want label and workspace repository", len(partial), err)
+	}
+
+	result, err := service.Onboard(ctx, request)
+	if err != nil {
+		t.Fatalf("resume onboarding: %v", err)
+	}
+	if result.Connection.ID != operation.ConnectionID || result.Connection.Status != domain.ConnectionReady {
+		t.Fatalf("resumed connection = %+v", result.Connection)
+	}
+	if multica.created != 1 || multica.workspaceResources != 1 || multica.projectResources != 2 {
+		t.Fatalf("resume repeated provider effects: projects=%d workspace_resources=%d project_resources=%d", multica.created, multica.workspaceResources, multica.projectResources)
+	}
+	resources, err := s.ListManagedResources(ctx, workspaceID, result.Connection.ID)
+	if err != nil || len(resources) != 3 {
+		t.Fatalf("resumed resources = %d, %v; want label and two resource contexts", len(resources), err)
 	}
 }
