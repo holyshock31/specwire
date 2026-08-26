@@ -3,6 +3,7 @@ package controlplane
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"specwire/bridge/internal/domain"
@@ -142,6 +143,21 @@ func TestConnectionOnboardingCreatesProjectAndBothResourceContexts(t *testing.T)
 	resources, err := s.ListManagedResources(ctx, "workspace-onboarding", result.Connection.ID)
 	if err != nil || len(resources) != 3 {
 		t.Fatalf("persisted resources = %d, %v", len(resources), err)
+	}
+	audits, err := s.ListAuditEvents(ctx, "workspace-onboarding", "", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerAuditActions := map[string]bool{}
+	for _, audit := range audits {
+		if strings.HasPrefix(audit.Action, "provider.") {
+			providerAuditActions[audit.Action] = true
+		}
+	}
+	for _, action := range []string{"provider.multica.project.create", "provider.gitlab.label.ensure", "provider.multica.workspace_repository.ensure", "provider.multica.project_resource.ensure"} {
+		if !providerAuditActions[action] {
+			t.Fatalf("missing provider audit action %q: %+v", action, providerAuditActions)
+		}
 	}
 	second, err := service.Onboard(ctx, OnboardingRequest{OperationID: "onboarding-operation", WorkspaceID: "workspace-onboarding", SourceGitLabInstance: gitlabInstance, SourceProjectExternalID: "gitlab-project-1", TargetMulticaInstance: multicaInstance, TargetWorkspace: provider.MulticaWorkspace{InstanceID: multicaInstance.ID, ExternalID: "workspace-1", Name: "Team"}, CreateTargetProject: true, PreferSSH: true, PublicHookURL: "https://specwire.example/hooks/gitlab"})
 	if err != nil {

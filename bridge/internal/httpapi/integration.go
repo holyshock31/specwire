@@ -668,7 +668,7 @@ func (s *Server) onboard(ctx context.Context, session domain.Session, workspaceI
 		targetProject = &provider.MulticaProject{InstanceID: targetInstance.ID, ExternalID: project.ExternalID, Title: project.Title, WorkspaceID: workspaceRef.ExternalID}
 	}
 	result, err := s.integration.Connections.Onboard(ctx, controlplane.OnboardingRequest{
-		OperationID: request.OperationID, WorkspaceID: workspaceID, SourceGitLabInstance: sourceInstance, SourceProjectExternalID: request.SourceProjectExternalID,
+		OperationID: request.OperationID, ActorID: session.AccountID, WorkspaceID: workspaceID, SourceGitLabInstance: sourceInstance, SourceProjectExternalID: request.SourceProjectExternalID,
 		Group: group, TargetMulticaInstance: targetInstance, TargetWorkspace: provider.MulticaWorkspace{InstanceID: targetInstance.ID, ExternalID: workspaceRef.ExternalID, Name: workspaceRef.Name}, TargetProject: targetProject,
 		CreateTargetProject: request.CreateTargetProject, TargetProjectTitle: request.TargetProjectTitle, PreferHTTPS: request.PreferHTTPS,
 	})

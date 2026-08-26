@@ -55,6 +55,10 @@ type SecretResolver interface {
 	Resolve(context.Context, domain.SecretRef) ([]byte, error)
 }
 
+type AuditRecorder interface {
+	CreateAuditEvent(context.Context, domain.AuditEvent) error
+}
+
 type GitLabCredentialResolver interface {
 	ResolveForConnection(context.Context, domain.Connection) (*provider.Credential, func(), error)
 }

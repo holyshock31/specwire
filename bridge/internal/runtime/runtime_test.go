@@ -225,6 +225,19 @@ func TestIngressAcceptsAndDeduplicatesPublication(t *testing.T) {
 	if len(multica.created) != 1 || multica.created[0].ProjectID != "target-1" || multica.created[0].Title != "[SpecWire] CHG-7" {
 		t.Fatalf("created=%+v", multica.created)
 	}
+	audits, err := db.ListAuditEvents(ctx, workspaceID, "flow_execution", executions[0].ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundProviderCreate := false
+	for _, audit := range audits {
+		if audit.Action == "provider.multica.issue.create" && audit.Payload["outcome"] == "succeeded" {
+			foundProviderCreate = true
+		}
+	}
+	if !foundProviderCreate {
+		t.Fatalf("provider side effect audit missing: %+v", audits)
+	}
 	correlation, err := db.GetCorrelation(ctx, workspaceID, "connection-runtime", "101", "CHG-7")
 	if err != nil || correlation.TargetIdentity != "issue-runtime" || correlation.SourceIssueIID != 7 {
 		t.Fatalf("correlation=%+v err=%v", correlation, err)

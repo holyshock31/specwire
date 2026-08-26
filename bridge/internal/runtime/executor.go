@@ -290,8 +290,10 @@ func (e *Executor) createIssue(ctx context.Context, instance domain.MulticaInsta
 	description := firstNonEmpty(stringValue(input["description"]), buildIssueDescription(connection, input))
 	result, err := e.multica.CreateIssue(ctx, instance, provider.IssueInput{ProjectID: projectID, Title: title, Description: description, Status: status, Assignee: stringValue(input["assignee"]), IdempotencyKey: execution.IdempotencyKey}, nil)
 	if err != nil {
+		e.recordProviderEffect(ctx, execution, "provider.multica.issue.create", "failed", "", projectID, err)
 		return nil, err
 	}
+	e.recordProviderEffect(ctx, execution, "provider.multica.issue.create", "succeeded", result.RequestID, projectID, nil)
 	if result.IssueID == "" {
 		return nil, fmt.Errorf("%w: Multica adapter returned no issue ID", domain.ErrInvalid)
 	}
@@ -321,8 +323,10 @@ func (e *Executor) completeIssue(ctx context.Context, instance domain.MulticaIns
 	}
 	result, err := e.multica.SetIssueStatus(ctx, instance, correlation.TargetIdentity, status, nil)
 	if err != nil {
+		e.recordProviderEffect(ctx, execution, "provider.multica.issue.status", "failed", "", correlation.TargetIdentity, err)
 		return nil, err
 	}
+	e.recordProviderEffect(ctx, execution, "provider.multica.issue.status", "succeeded", result.RequestID, correlation.TargetIdentity, nil)
 	out := map[string]any{"issue_id": correlation.TargetIdentity, "status": result.Status, "provider_request_id": result.RequestID, "correlation_id": execution.CorrelationID}
 	issueIIDs := append([]int(nil), correlation.SourceIssueIIDs...)
 	if len(issueIIDs) == 0 && correlation.SourceIssueIID > 0 {
@@ -345,8 +349,10 @@ func (e *Executor) completeIssue(ctx context.Context, instance domain.MulticaIns
 	closed := 0
 	for _, issueIID := range issueIIDs {
 		if err := e.gitlab.CloseIssue(ctx, gitlabInstance, project, issueIID, credential); err != nil {
+			e.recordProviderEffect(ctx, execution, "provider.gitlab.issue.close", "failed", "", strconv.Itoa(issueIID), err)
 			return nil, &reconciliationError{err: fmt.Errorf("close GitLab publication Issue %d: %w", issueIID, err)}
 		}
+		e.recordProviderEffect(ctx, execution, "provider.gitlab.issue.close", "succeeded", "", strconv.Itoa(issueIID), nil)
 		closed++
 	}
 	out["gitlab_issue_close"] = "closed"
@@ -580,6 +586,18 @@ func redactedMap(value map[string]any) map[string]any {
 		return map[string]any{}
 	}
 	return redacted
+}
+
+func (e *Executor) recordProviderEffect(ctx context.Context, execution domain.FlowExecution, action, outcome, requestID, externalID string, effectErr error) {
+	recorder, ok := e.store.(AuditRecorder)
+	if !ok {
+		return
+	}
+	payload := map[string]any{"workspace_id": execution.WorkspaceID, "flow_id": execution.FlowID, "flow_version": execution.FlowVersion, "provider_request_id": requestID, "external_id": externalID, "outcome": outcome}
+	if effectErr != nil {
+		payload["error"] = safeError(effectErr)
+	}
+	_ = recorder.CreateAuditEvent(ctx, domain.AuditEvent{ID: domain.NewID(), WorkspaceID: execution.WorkspaceID, Action: action, EntityType: "flow_execution", EntityID: execution.ID, Payload: payload})
 }
 
 func buildIssueDescription(connection domain.Connection, input map[string]any) string {

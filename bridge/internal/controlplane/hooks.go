@@ -183,6 +183,9 @@ func (r *HookReconciler) ensureHook(ctx context.Context, connection domain.Conne
 	if err != nil {
 		return domain.Hook{}, err
 	}
+	recordAudit(ctx, r.store, domain.AuditEvent{ID: domain.NewID(), WorkspaceID: connection.WorkspaceID, Action: "provider.gitlab.hook.ensure", EntityType: "connection", EntityID: connection.ID, Payload: map[string]any{
+		"workspace_id": connection.WorkspaceID, "provider": "gitlab", "operation": "ensure_hook", "external_id": hookResult.ExternalID, "request_id": hookResult.RequestID, "created": hookResult.Created, "adopted": hookResult.Adopted,
+	}})
 	hookID := hookResult.ExternalID
 	if hookID == "" {
 		return domain.Hook{}, fmt.Errorf("%w: GitLab Hook adapter returned no external ID", domain.ErrInvalid)

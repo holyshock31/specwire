@@ -92,6 +92,7 @@ func (s *ConnectionService) ListMulticaProjects(ctx context.Context, instance do
 
 type OnboardingRequest struct {
 	OperationID             domain.ID
+	ActorID                 domain.ID
 	WorkspaceID             domain.ID
 	SourceGitLabInstance    domain.GitLabInstance
 	SourceProjectExternalID string
@@ -318,6 +319,9 @@ func (s *ConnectionService) Onboard(ctx context.Context, request OnboardingReque
 		if err != nil {
 			return fail(err, domain.OnboardingFailed)
 		}
+		s.recordProviderEffect(ctx, request, "provider.gitlab.label.ensure", "connection", connection.ID, map[string]any{
+			"provider": "gitlab", "operation": "ensure_label", "external_id": label.ExternalID, "request_id": label.RequestID, "created": label.Created, "adopted": label.Adopted,
+		})
 	}
 	labelResource, err := s.store.EnsureManagedResource(ctx, domain.ManagedResource{ID: domain.NewID(), WorkspaceID: request.WorkspaceID, ConnectionID: connection.ID, Kind: domain.ResourceLabel, Provider: domain.ProviderGitLab, InstanceID: request.SourceGitLabInstance.ID, ExternalID: label.ExternalID, Ownership: ownershipFrom(label.Created, label.Adopted), ManagementMark: "specwire-managed", Status: "ready", Snapshot: map[string]any{"title": label.Title, "request_id": label.RequestID}})
 	if err != nil {
@@ -348,6 +352,9 @@ func (s *ConnectionService) Onboard(ctx context.Context, request OnboardingReque
 		if err != nil {
 			return fail(err, domain.OnboardingFailed)
 		}
+		s.recordProviderEffect(ctx, request, "provider.multica.workspace_repository.ensure", "connection", connection.ID, map[string]any{
+			"provider": "multica", "operation": "ensure_workspace_repository", "external_id": workspaceResource.ExternalID, "request_id": workspaceResource.RequestID, "created": workspaceResource.Created, "adopted": workspaceResource.Adopted,
+		})
 	}
 	resource, err := s.store.EnsureManagedResource(ctx, resourceFromResult(request.WorkspaceID, connection.ID, request.TargetMulticaInstance.ID, workspaceResource))
 	if err != nil {
@@ -367,6 +374,9 @@ func (s *ConnectionService) Onboard(ctx context.Context, request OnboardingReque
 		if err != nil {
 			return fail(err, domain.OnboardingFailed)
 		}
+		s.recordProviderEffect(ctx, request, "provider.multica.project_resource.ensure", "connection", connection.ID, map[string]any{
+			"provider": "multica", "operation": "ensure_project_resource", "external_id": projectResource.ExternalID, "request_id": projectResource.RequestID, "created": projectResource.Created, "adopted": projectResource.Adopted,
+		})
 	}
 	resource, err = s.store.EnsureManagedResource(ctx, resourceFromResult(request.WorkspaceID, connection.ID, request.TargetMulticaInstance.ID, projectResource))
 	if err != nil {
@@ -472,7 +482,14 @@ func (s *ConnectionService) ensureTargetProject(ctx context.Context, request Onb
 			return provider.MulticaProject{}, fmt.Errorf("%w: Multica project title %q already exists; choose it explicitly", domain.ErrConflict, title)
 		}
 	}
-	return s.multica.CreateProject(ctx, request.TargetMulticaInstance, provider.CreateProjectInput{InstanceID: request.TargetMulticaInstance.ID, WorkspaceID: request.TargetWorkspace.ExternalID, Title: title, IdempotencyKey: string(operationID) + ":project"}, credential)
+	project, err := s.multica.CreateProject(ctx, request.TargetMulticaInstance, provider.CreateProjectInput{InstanceID: request.TargetMulticaInstance.ID, WorkspaceID: request.TargetWorkspace.ExternalID, Title: title, IdempotencyKey: string(operationID) + ":project"}, credential)
+	if err != nil {
+		return provider.MulticaProject{}, err
+	}
+	s.recordProviderEffect(ctx, request, "provider.multica.project.create", "multica_project", domain.ID(project.ExternalID), map[string]any{
+		"provider": "multica", "operation": "create_project", "external_id": project.ExternalID, "workspace_id": project.WorkspaceID, "title": project.Title, "idempotency_key": string(operationID) + ":project",
+	})
+	return project, nil
 }
 
 func requestGitLabCredentialRef(request OnboardingRequest) *domain.SecretRef {
@@ -602,6 +619,18 @@ func safeMessage(err error) string {
 	}
 	return message
 }
+
+func (s *ConnectionService) recordProviderEffect(ctx context.Context, request OnboardingRequest, action, entityType string, entityID domain.ID, payload map[string]any) {
+	if entityID.Empty() {
+		return
+	}
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["workspace_id"] = request.WorkspaceID
+	recordAudit(ctx, s.store, domain.AuditEvent{ID: domain.NewID(), WorkspaceID: request.WorkspaceID, ActorAccountID: request.ActorID, Action: action, EntityType: entityType, EntityID: entityID, Payload: payload})
+}
+
 func clearBytes(value []byte) {
 	for i := range value {
 		value[i] = 0
