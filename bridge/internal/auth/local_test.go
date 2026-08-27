@@ -49,6 +49,20 @@ func TestLocalProviderBootstrapLoginCSRFAndLogout(t *testing.T) {
 	if err := provider.ValidateCSRF(session, "wrong"); !errors.Is(err, ErrCSRF) {
 		t.Fatalf("wrong CSRF = %v", err)
 	}
+	refreshedCSRF, err := provider.RefreshCSRF(context.Background(), session)
+	if err != nil {
+		t.Fatalf("RefreshCSRF: %v", err)
+	}
+	refreshedSession, err := provider.Authenticate(context.Background(), credentials.Token)
+	if err != nil {
+		t.Fatalf("Authenticate after RefreshCSRF: %v", err)
+	}
+	if err := provider.ValidateCSRF(refreshedSession, refreshedCSRF); err != nil {
+		t.Fatalf("refreshed CSRF: %v", err)
+	}
+	if err := provider.ValidateCSRF(refreshedSession, credentials.CSRFToken); !errors.Is(err, ErrCSRF) {
+		t.Fatalf("old CSRF after refresh = %v, want csrf validation failed", err)
+	}
 	if _, _, err := provider.Login(context.Background(), "admin@example.com", "wrong password"); !errors.Is(err, ErrInvalidCredentials) {
 		t.Fatalf("wrong password = %v", err)
 	}

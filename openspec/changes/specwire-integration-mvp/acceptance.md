@@ -16,9 +16,9 @@
 | 编号 | 来源 | 验收场景 | 结果 | 证据/说明 |
 |---|---|---|---|---|
 | A-01 | admin / local auth | 首次创建管理员，再登录并进入 Default Workspace | **通过（浏览器）** | 合法邮箱和 8 位以上密码：bootstrap `201`，login `200`，首页和 Workspace 可加载 |
-| A-02 | admin / local auth | 非法首次安装输入被拒绝，并给出可理解反馈 | **部分通过** | `admin` + 6 位密码返回 `400 invalid request`；错误本身正确，但成功后旧错误文案仍残留 |
+| A-02 | admin / local auth | 非法首次安装输入被拒绝，并给出可理解反馈 | **通过（浏览器）** | `admin` + 短密码返回 `400 invalid request`；随后用合法密码创建成功，旧错误文案已清空 |
 | A-03 | admin | 登录后添加 GitLab / Multica 实例 | **部分通过** | 重新登录后两个实例都能保存；Provider 列表刷新会立即触发发现请求 |
-| A-04 | admin / security | 登录会话刷新后仍能执行 mutation | **失败（阻断）** | 刷新页面后 `auth/me` 只恢复账户，不恢复 CSRF token；添加实例返回 `403 csrf validation failed` |
+| A-04 | admin / security | 登录会话刷新后仍能执行 mutation | **通过（浏览器）** | 刷新页面后 `auth/me` 恢复 CSRF token，随后再次添加 GitLab 实例成功；HTTP 回归测试覆盖 CSRF cookie 缺失时的恢复 |
 | A-05 | admin / integration-flow | Onboarding 级联选择 GitLab instance → Group → project、Multica instance → Workspace → project | **未通过浏览器验收** | 页面有级联控件，但需要真实 provider 或可注入的浏览器 fake；当前隔离环境未执行外部发现 |
 | A-06 | admin / integration-flow | Onboarding dry-run 展示 instance/external ID、资源、Hook 计划和默认值 | **后端通过，页面部分** | provider fake 和 API 测试覆盖；实际页面是 Connections 页内嵌表单 + JSON 预览，不是原型中的四步向导和右侧预览 |
 | A-07 | admin / integration-flow | Onboarding 幂等创建/采用两个 Multica resource context，并支持部分失败恢复 | **后端通过** | `TestConnectionOnboardingCreatesProjectAndBothResourceContexts`、`TestConnectionOnboardingResumesAfterPartialResourceFailure` |
@@ -40,11 +40,13 @@
 3. `flow-builder-publish-change.png` 是 Connection 上下文中的全屏 Builder，带节点库、画布工具栏、类型化端口、Inspector、模型契约和发布校验；实际页面虽然提供画布、节点库、Inspector 和 JSON 编辑器，但整体是同一静态页中的简化区域，交互层级、端口连线表达和视觉结构明显简化。
 4. 新建的 persistent-only 数据库仍会由兼容导入逻辑生成 `GitLab (legacy)` 和 `Multica (legacy)` endpoint 记录；这会让“新方案首次进入”与原型中的已配置实例状态混在一起，需要在接受前明确清理或重新定义初始化行为。
 
-## 阻断项
+## 阻断项与修复状态
 
-- **B-01：CSRF token 在页面刷新后丢失。** 这是实际功能阻断，不是视觉差异；用户重新打开页面后无法添加实例、创建 Connection、保存 Flow 等任何 mutation。
-- **B-02：首次安装成功后错误文案不清除。** 会让用户误以为管理员创建失败。
+- **B-01：CSRF token 在页面刷新后丢失——已修复并回归通过。** 登录时写入非 HttpOnly 的 CSRF cookie；`auth/me` 校验并在缺失/失效时轮换 token，前端启动时恢复 `state.csrf`。用户重新打开页面后可以继续执行 mutation。
+- **B-02：首次安装成功后错误文案不清除——已修复并回归通过。** bootstrap 开始时清空登录错误区域。
 - **B-03：浏览器验收缺少可重复的 provider fake 环境。** 后端 fake 已有，但不能直接驱动真实浏览器主路径；因此 Onboarding、Connection Detail、Builder 和 Execution Detail 尚不能作为“已验收”交付。
+
+本轮修复新增了 `RefreshCSRF`、CSRF cookie 和 `auth/me` 恢复逻辑，并补充 LocalProvider/HTTP API 回归测试。
 
 ## 自动化验证
 
@@ -54,6 +56,7 @@
 go test ./...
 go test -race ./...
 go vet ./...
+node --check <(sed -n '/<script>/,/<\/script>/p' bridge/admin/static/integrations.html | sed '1d;$d')
 openspec validate --changes
 docker compose build
 ```
@@ -62,4 +65,4 @@ docker compose build
 
 ## 验收结论
 
-**当前 Change 不通过最终验收。** 后端核心纵向切片基本可用，但至少需要先修复 B-01，并补齐可重复的浏览器验收路径；随后再处理三张正式原型与实际页面的信息架构和视觉落差。未执行真实 GitLab/Multica E2E，也不应归档或同步本 Change 到 `openspec/specs/`。
+**当前 Change 仍不通过最终验收。** B-01/B-02 已修复并通过浏览器和回归测试，但仍需补齐可重复的 provider fake 浏览器路径，完成三张正式原型与实际页面的信息架构/视觉落差收敛，并执行真实 GitLab/Multica E2E。未完成这些人工闸门前，不应归档或同步本 Change 到 `openspec/specs/`。

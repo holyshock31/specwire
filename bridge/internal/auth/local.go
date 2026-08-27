@@ -28,6 +28,7 @@ type Store interface {
 	GetPasswordHash(context.Context, domain.ID) (string, error)
 	CreateSession(context.Context, domain.Session) error
 	GetSessionByTokenHash(context.Context, string) (domain.Session, error)
+	RotateSessionCSRF(context.Context, domain.ID, string) error
 	RevokeSession(context.Context, domain.ID) error
 	ListRoleBindings(context.Context, domain.ID, domain.ID) ([]domain.ScopedRoleBinding, error)
 }
@@ -141,6 +142,22 @@ func (p *LocalProvider) ValidateCSRF(session domain.Session, csrfToken string) e
 		return ErrCSRF
 	}
 	return nil
+}
+
+// RefreshCSRF replaces the CSRF secret for an authenticated session. The raw
+// token is returned only to the caller; the store keeps its hash.
+func (p *LocalProvider) RefreshCSRF(ctx context.Context, session domain.Session) (string, error) {
+	if session.ID.Empty() {
+		return "", ErrInvalidSession
+	}
+	csrf, err := randomToken()
+	if err != nil {
+		return "", fmt.Errorf("create CSRF token: %w", err)
+	}
+	if err := p.store.RotateSessionCSRF(ctx, session.ID, hashToken(csrf)); err != nil {
+		return "", err
+	}
+	return csrf, nil
 }
 
 func (p *LocalProvider) Logout(ctx context.Context, sessionID domain.ID) error {

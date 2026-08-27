@@ -16,6 +16,7 @@ import (
 
 const (
 	sessionCookie = "specwire_session"
+	csrfCookie    = "specwire_csrf"
 	csrfHeader    = "X-CSRF-Token"
 )
 
@@ -103,6 +104,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: credentials.Token, Path: "/", HttpOnly: true, Secure: s.secureCookie, SameSite: http.SameSiteLaxMode, Expires: credentials.ExpiresAt})
+	http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: credentials.CSRFToken, Path: "/", Secure: s.secureCookie, SameSite: http.SameSiteLaxMode, Expires: credentials.ExpiresAt})
 	writeJSON(w, http.StatusOK, map[string]any{"account": account, "csrf_token": credentials.CSRFToken, "expires_at": credentials.ExpiresAt})
 }
 
@@ -119,6 +121,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: s.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: "", Path: "/", Secure: s.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: -1})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -132,7 +135,18 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"account": account, "session": map[string]any{"id": session.ID, "expires_at": session.ExpiresAt}})
+	csrfToken := ""
+	if cookie, err := r.Cookie(csrfCookie); err == nil && s.auth.ValidateCSRF(session, cookie.Value) == nil {
+		csrfToken = cookie.Value
+	} else {
+		csrfToken, err = s.auth.RefreshCSRF(r.Context(), session)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: csrfCookie, Value: csrfToken, Path: "/", Secure: s.secureCookie, SameSite: http.SameSiteLaxMode, Expires: session.ExpiresAt})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"account": account, "csrf_token": csrfToken, "session": map[string]any{"id": session.ID, "expires_at": session.ExpiresAt}})
 }
 
 func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {

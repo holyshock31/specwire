@@ -253,6 +253,22 @@ func (s *Store) GetSessionByTokenHash(ctx context.Context, tokenHash string) (do
 	return session, nil
 }
 
+func (s *Store) RotateSessionCSRF(ctx context.Context, sessionID domain.ID, csrfTokenHash string) error {
+	if sessionID.Empty() || strings.TrimSpace(csrfTokenHash) == "" {
+		return fmt.Errorf("%w: session id and CSRF token hash are required", domain.ErrInvalid)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET csrf_token_hash = ? WHERE id = ? AND revoked_at IS NULL`, csrfTokenHash, sessionID)
+	if err != nil {
+		return fmt.Errorf("rotate session CSRF: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("check rotated session CSRF: %w", err)
+	} else if affected == 0 {
+		return fmt.Errorf("%w: session %s", domain.ErrNotFound, sessionID)
+	}
+	return nil
+}
+
 func (s *Store) RevokeSession(ctx context.Context, sessionID domain.ID) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, nowText(), sessionID)
 	if err != nil {
