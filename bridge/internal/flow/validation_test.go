@@ -42,7 +42,7 @@ func TestAbandonTemplateMapsCancellationLifecycle(t *testing.T) {
 		t.Fatalf("abandon template invalid: %+v", result.Diagnostics)
 	}
 
-	mapping, err := simulationMapping(template.Nodes[2], "MulticaCompleteIssueInput.v1")
+	mapping, err := simulationMapping(template.Nodes[2], "MulticaCancelIssueInput.v1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestAbandonTemplateMapsCancellationLifecycle(t *testing.T) {
 	if output["desired_status"] != "cancelled" || output["lifecycle_event"] != "abandoned" || output["lifecycle_reason"] != "change has no actual content" {
 		t.Fatalf("cancellation mapping output = %#v", output)
 	}
-	if err := ValidateModelValue(catalog, "MulticaCompleteIssueInput.v1", output); err != nil {
+	if err := ValidateModelValue(catalog, "MulticaCancelIssueInput.v1", output); err != nil {
 		t.Fatalf("cancellation output rejected: %v", err)
 	}
 }

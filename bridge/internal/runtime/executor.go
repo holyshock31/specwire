@@ -260,7 +260,7 @@ func (e *Executor) executeOutput(ctx context.Context, behavior domain.ConnectorB
 	switch behavior.Key {
 	case "multica.create-issue":
 		return e.createIssue(ctx, instance, projectID, input, execution, connection)
-	case "multica.complete-issue":
+	case "multica.complete-issue", "multica.cancel-issue":
 		return e.completeIssue(ctx, instance, input, event, execution, connection)
 	default:
 		return nil, fmt.Errorf("%w: output behavior %s is not implemented", domain.ErrInvalid, behavior.Key)

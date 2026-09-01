@@ -308,7 +308,17 @@
 | L-02 | 已有 Change Issue 的 `Issue Hook update` 明确新增 `specwire::abandoned` 标签后转为 `cancelled` | **通过（定向自动化）** | `TestAbandonIssueRequiresControlledLabelTransition`、`TestIngressAndExecutorAbandonCancelsProjection`；状态、Correlation、GitLab note/close 均有断言 |
 | L-03 | abandon 路由只接受精确标签 transition；标签已存在、没有 `changes.labels`、仅描述变更或其他 action 均不触发 | **通过（定向自动化）** | `internal/runtime/lifecycle_test.go` 覆盖新增标签、已有标签、无 label diff、无关更新和错误 action |
 | L-04 | 取消后的投影不会被重复 abandon、Bridge 自己的后处理更新或较晚 archived 事件复活 | **通过（定向自动化）** | `TestIngressAndExecutorAbandonCancelsProjection` 断言终态保护以及不重复调用 Multica、GitLab note/close |
-| L-05 | persistent-only 运行时使用 Connection 绑定的 Multica profile | **待运行态复验** | 代码路径由 `MulticaAdapter` 使用持久化实例/profile；需重建并重启 worktree Bridge 后用真实 `WW1-20` 做一次受控验证 |
+| L-05 | persistent-only 运行时使用 Connection 绑定的 Multica profile | **待真实生命周期事件复验** | Bridge 已在 worktree 重建并稳定启动；取消 Flow 使用 Connection 的持久化 Multica instance/profile。真实 `WW1-20` 状态变更仍需一次受控 abandoned label transition 验证 |
 | L-06 | Multica 看板展示取消状态 | **不属于 SpecWire 本 Change** | 当前 Multica 前端未提供 Cancelled 列；这不影响 API/CLI 的 `cancelled` 状态。若产品要求看板可见，需要在 Multica 产品/镜像侧另立变更 |
 
 本轮只修改 worktree 中的 Bridge 和 Change 文档，没有重启当前运行容器；因此 `127.0.0.1:8787` 仍可能运行旧镜像，真实 `WW1-20` 的取消状态不会因本轮代码落盘自动改变。部署和真实 E2E 仍属于任务 `8.6`，需单独授权后执行。
+
+## persistent Bridge 预置 Flow 修复（2026-09-02）
+
+本轮发现已有数据库中的 `MulticaCompleteIssueInput@v1` 是早期已发布的完成模型，按不可变契约不能直接扩展为取消模型。修复后保留该 v1 定义，新增 `MulticaCancelIssueInput@v1` 与 `multica.cancel-issue@1.0.0`，取消行为仍通过已部署的 `multica.issue.status` adapter 使用 Connection 绑定的 Multica profile。
+
+| 编号 | 验收场景 | 结果 | 证据 |
+|---|---|---|---|
+| L-07 | 已有 persistent 数据库在重启时不因不可变 completion 模型冲突而失败，并自动补齐 abandon Flow/route | **通过（单测 + 运行态）** | `go test ./...` 全部通过；`docker compose up -d --build bridge` 后容器稳定 `Up`，日志只有 `persistent-only cutover enabled`/`bridge listening`；数据库包含 `abandon-change` 模板、2 个已发布 `Abandon Change` Flow 和 2 条 active `gitlab.issue-abandon-hook` 路由 |
+
+本轮未重放已存在的 abandoned 标签事件，也未修改 GitLab Issue 或 Multica issue 状态；由于 abandon matcher 要求标签从不存在到新增，历史事件不会在路由补齐后自动重放。

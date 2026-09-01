@@ -185,7 +185,7 @@ func TestRegistryBootstrapIsIdempotentAndImmutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.ConnectorTypes != 2 || counts.Behaviors != 5 || counts.DataModels != 5 {
+	if counts.ConnectorTypes != 2 || counts.Behaviors != 6 || counts.DataModels != 6 {
 		t.Fatalf("registry counts = %+v", counts)
 	}
 	bundle.DataModels[0].DisplayName = "changed after publication"

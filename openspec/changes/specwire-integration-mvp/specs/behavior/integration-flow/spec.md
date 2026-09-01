@@ -78,7 +78,7 @@ The Flow Builder MUST allow an author to create a draft from a template or an em
 
 ### Requirement: DataModel 是节点之间的独立数据契约
 
-SpecWire MUST maintain a declarative, versioned DataModel registry. A DataModel definition MUST describe its schema, required fields, type information, extension-field policy, and any platform semantic roles. Built-in models MUST be delivered as declarative registry definitions rather than scattered provider-specific code. The MVP registry MUST provide `ChangePublication.v1`, `ArchiveCompletion.v1`, `ChangeLifecycle.v1`, `MulticaCreateIssueInput.v1`, and `MulticaCompleteIssueInput.v1` with the required fields, roles, and defaults defined by the published change contract. An administrator MAY add a new model or model version, but MUST NOT mutate a published model version in place. A DataModel is a port or edge contract in a Flow and is not required to be a visible canvas node.
+SpecWire MUST maintain a declarative, versioned DataModel registry. A DataModel definition MUST describe its schema, required fields, type information, extension-field policy, and any platform semantic roles. Built-in models MUST be delivered as declarative registry definitions rather than scattered provider-specific code. The MVP registry MUST provide `ChangePublication.v1`, `ArchiveCompletion.v1`, `ChangeLifecycle.v1`, `MulticaCreateIssueInput.v1`, `MulticaCompleteIssueInput.v1`, and `MulticaCancelIssueInput.v1` with the required fields, roles, and defaults defined by the published change contract. An administrator MAY add a new model or model version, but MUST NOT mutate a published model version in place. A DataModel is a port or edge contract in a Flow and is not required to be a visible canvas node.
 
 #### Scenario: 系统提供内置数据模型
 

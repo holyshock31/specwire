@@ -57,8 +57,6 @@ func DefaultMappingForModel(model string) (MappingSpec, bool) {
 			"correlation_id": {Source: "$input.change_id"},
 			"change_id":      {Source: "$input.change_id"},
 			"desired_status": {Constant: "done"},
-			"lifecycle_event": {Source: "$input.lifecycle_event"},
-			"lifecycle_reason": {Source: "$input.lifecycle_reason"},
 		}, true
 	default:
 		return nil, false
