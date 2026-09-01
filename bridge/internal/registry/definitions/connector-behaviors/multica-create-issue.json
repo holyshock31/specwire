@@ -1,0 +1,19 @@
+{
+  "connector_type_key": "multica",
+  "connector_type_version": "1.0.0",
+  "key": "multica.create-issue",
+  "version": "1.0.0",
+  "display_name": "Multica Create Issue",
+  "direction": "output",
+  "parameter_schema": {
+    "type": "object",
+    "properties": {"project": {"type": "string", "binding_kinds": ["connection_ref"]}},
+    "required": ["project"]
+  },
+  "input_model_ref": "MulticaCreateIssueInput.v1",
+  "required_capabilities": ["multica.issue.create"],
+  "adapter_operation": "multica.issue.create",
+  "idempotency_strategy": "correlation_id",
+  "reconciliation": "issue_search_by_correlation",
+  "status": "published"
+}

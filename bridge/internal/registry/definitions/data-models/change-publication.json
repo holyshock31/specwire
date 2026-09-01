@@ -1,0 +1,28 @@
+{
+  "key": "ChangePublication",
+  "version": "v1",
+  "display_name": "Change Publication",
+  "description": "Canonical publication event for a proposed change.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "change_id": {"type": "string"},
+      "branch": {"type": "string"},
+      "branch_head_sha": {"type": "string"},
+      "source_project": {"type": "string"},
+      "issue_iid": {"type": "integer"},
+      "issue_url": {"type": "string"},
+      "target_ref": {"type": "string", "default": "refs/heads/main"},
+      "status": {"type": "string", "default": "backlog"},
+      "assignee": {"type": "string"}
+    }
+  },
+  "required_fields": ["change_id", "branch", "branch_head_sha"],
+  "semantic_roles": {
+    "change_id": "change_identity",
+    "branch": "source_branch",
+    "branch_head_sha": "frozen_revision"
+  },
+  "allow_extensions": true,
+  "status": "published"
+}

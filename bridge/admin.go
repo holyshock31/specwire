@@ -28,6 +28,9 @@ import (
 //go:embed admin/static/index.html
 var adminIndexHTML []byte
 
+//go:embed admin/static/integrations.html
+var integrationsHTML []byte
+
 // adminState 是 admin API 的运行时状态：
 //   - SecretByPath：GitLab 项目 → 专属 signing token 索引，供 token 轮换时定位并移除旧 token；
 //   - RestartRequired：apply 后置 true，页面显示"重启生效"提示；仅内存态，
@@ -139,6 +142,13 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(adminIndexHTML)
+	case path == "/integrations" || path == "/integrations.html":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(integrationsHTML)
 	case strings.HasPrefix(path, "/api/"):
 		if !h.authorized(r) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
@@ -148,6 +158,18 @@ func (h *adminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// servePersistentAdminPage is the cutover-mode page handler.  The persistent
+// control plane owns authentication and all mutations in this mode, so the
+// legacy .env admin handler must not be constructed merely to serve HTML.
+func servePersistentAdminPage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(integrationsHTML)
 }
 
 func (h *adminHandler) routeAPI(w http.ResponseWriter, r *http.Request, path string) {

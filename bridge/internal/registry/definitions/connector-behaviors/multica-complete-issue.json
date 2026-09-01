@@ -1,0 +1,19 @@
+{
+  "connector_type_key": "multica",
+  "connector_type_version": "1.0.0",
+  "key": "multica.complete-issue",
+  "version": "1.0.0",
+  "display_name": "Multica Complete Issue",
+  "direction": "output",
+  "parameter_schema": {
+    "type": "object",
+    "properties": {"project": {"type": "string", "binding_kinds": ["connection_ref"]}},
+    "required": ["project"]
+  },
+  "input_model_ref": "MulticaCompleteIssueInput.v1",
+  "required_capabilities": ["multica.issue.update"],
+  "adapter_operation": "multica.issue.status",
+  "idempotency_strategy": "correlation_id",
+  "reconciliation": "issue_status_read",
+  "status": "published"
+}

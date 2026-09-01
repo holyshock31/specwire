@@ -6,12 +6,14 @@ SpecWire 是 **GitLab 与 Multica 之间的集成边界**（PoC）。OpenSpec、
 
 ```
 openspec/
-  specs/                        ← 主规格（当前已实现的行为契约）
-    workflow/spec.md            ← SpecWire 可见的发布/完成集成生命周期
-    bridge/spec.md              ← Bridge 组件：事件校验/判重/映射/闭环
-    admin/spec.md               ← Bridge 控制面：项目映射、Hook、凭据、配置
-  changes/                      ← 未完成变更提案（现状 → 目标的差异）
-    archive/                    ← 已完成变更记录
+  drafts/                       ← 尚未形成正式 Change 的探索材料
+  changes/                      ← 一次完整变更的设计、delta specs 和任务
+    archive/                    ← 已完成变更及其原型/设计历史
+  specs/                        ← 当前已接受、已发布的完整知识
+    behavior/                   ← 功能行为契约
+    domain/                     ← 领域术语和模型
+    architecture/               ← 架构设计与 ADR
+    experience/                 ← 产品体验和交互契约
 ```
 
 ```bash
@@ -30,9 +32,10 @@ openspec validate             # 校验全部
 
 ## 文档职责
 
-- 当前行为以 `openspec/specs/` 为准；`openspec/changes/` 只描述尚未完成的变更，完成后移入 `openspec/changes/archive/`。
-- `CONTEXT.md` 与 `docs/adr/` 分别维护领域边界/术语和已接受的架构理由。
-- `docs/specwire-next-requirements.md` 是平台路线图与运维沉淀，不是当前行为契约；其中每项要落地的要求都必须先建立 OpenSpec change。
+- 当前知识以 `openspec/specs/` 下对应类型目录为准；`openspec/changes/` 保存尚未完成的变更，完成后移入 `openspec/changes/archive/`。
+- `CONTEXT.md` 是领域文档入口；领域术语以 `openspec/specs/domain/` 为准，架构理由以 `openspec/specs/architecture/adr/` 为准。
+- 尚未形成 Change 的路线图和设计草稿放在 `openspec/drafts/`；其中需要落地的条目必须先整理成 OpenSpec change。
+- `docs/agents/` 只保存 Agent 和仓库操作规程，不属于产品设计草稿。
 - 客户端 Skills 文档只定义如何消费 SpecWire 协议，不定义 Bridge 行为。
 
 ## GitHub Release

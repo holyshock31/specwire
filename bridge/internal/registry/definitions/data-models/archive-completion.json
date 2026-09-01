@@ -1,0 +1,24 @@
+{
+  "key": "ArchiveCompletion",
+  "version": "v1",
+  "display_name": "Archive Completion",
+  "description": "Canonical completion event used to close an existing projection.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "change_id": {"type": "string"},
+      "source_project": {"type": "string"},
+      "target_ref": {"type": "string", "default": "refs/heads/main"},
+      "provider_delivery_id": {"type": "string"}
+    }
+  },
+  "required_fields": ["change_id", "source_project", "target_ref", "provider_delivery_id"],
+  "semantic_roles": {
+    "change_id": "change_identity",
+    "source_project": "source_project_identity",
+    "target_ref": "target_ref",
+    "provider_delivery_id": "delivery_identity"
+  },
+  "allow_extensions": true,
+  "status": "published"
+}

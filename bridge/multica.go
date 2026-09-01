@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -30,6 +31,18 @@ func listProjects(ctx context.Context, cfg *Config) ([]multicaProject, error) {
 		"--profile", cfg.MulticaProfile,
 		"project", "list",
 		"--output", "json",
+	}
+	// The legacy map resolver runs before the persistent Multica endpoint is
+	// loaded. Honor the explicitly configured server when present so a
+	// one-time import uses the same endpoint inside or outside Docker; keep
+	// profile resolution as the fallback for older local deployments.
+	if serverURL := strings.TrimSpace(os.Getenv("MULTICA_SERVER_URL")); serverURL != "" {
+		args = []string{
+			"--profile", cfg.MulticaProfile,
+			"--server-url", serverURL,
+			"project", "list",
+			"--output", "json",
+		}
 	}
 	cmd := exec.Command("multica", args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

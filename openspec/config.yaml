@@ -4,20 +4,22 @@ schema: spec-driven
 # This is shown to AI when creating artifacts.
 context: |
   SpecWire：GitLab 与 Multica 之间的集成边界（PoC）；本地 Skills 和 Agent 是独立客户端。
-  - 组件：SpecWire Bridge（Go，Docker Compose 部署，GitLab Issue Hook → Multica 建卡；archived Push Hook → 完成投影并关闭 GitLab Issue）。
+  - 组件：SpecWire Bridge（Go，Docker Compose 部署，GitLab Issue Hook → Multica 建卡；archived Push Hook → 完成投影；已有 Change Issue 添加 specwire::abandoned 标签 → 取消投影并记录/关闭 GitLab Issue）。
   - 基础设施：GitLab CE 19.1（http://gitlab.specwire.test:8929，容器 specwire-net 网络）；
     Multica self-host（127.0.0.1:28080）；本机 macOS。
-  - 事件模型：GitLab Issue Hook（action=open、label=change）负责新发布；main 上的 archived Push Hook 只负责完成。
-  - 关键约定：稳定键 <path>:<change>:<branch_head_sha>:<project_id>（四段）；项目映射 SPECWIRE_PROJECT_MAP；
+  - 事件模型：GitLab Issue Hook（action=open、label=change）负责新发布；main 上带 archived 生命周期的 Push Hook 完成投影；Issue Hook（action=update）新增精确标签 specwire::abandoned 取消投影，原因从同一 Issue 描述中的 SpecWire-Reason 读取。abandoned Push Hook 不再是活动协议。
+  - 关键约定：稳定键 <path>:<change>:<branch_head_sha>:<project_id>（四段）；项目映射 SPECWIRE_PROJECT_MAP 仅用于显式 legacy import；
     发布者按次指定 SpecWire-Status/Assignee；branch_head_sha 是冻结基线；issue_links 保存发布 Issue 关联。
-  - 端到端场景：本地 Skill 创建 feat/fix 分支并运行 opsx:propose、commit/push、创建 GitLab Issue；Multica/Agent 执行与 MR 评审属于客户端/执行系统；archive Skill push 后由 Bridge 完成投影和 Issue 闭环。
+  - 端到端场景：本地 Skill 创建 feat/fix 分支并运行 opsx:propose、commit/push、创建 GitLab Issue；Multica/Agent 执行与 MR 评审属于客户端/执行系统；archive Skill 的 main archived Push 完成投影，abandon Skill 归档分支后更新已有 Issue 标签，由 Bridge 取消投影及完成 Issue 闭环。
   - 文档语言：中文为主，术语保留英文。
+  - 文档生命周期：openspec/drafts/ 保存未成形探索，openspec/changes/<change-id>/ 保存一次完整变更，openspec/specs/ 保存当前已接受知识。
+  - 已发布知识按 behavior、domain、architecture、experience 分目录；draft 和 change 中的材料通过评审后按类型合并到对应目录。
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
 rules:
   proposal:
-    - 动机必须关联 Issue 发布或 archived Push Hook 与投影闭环
+    - 动机必须关联 Issue 发布、archived Push Hook 或受控 abandoned Issue 标签与投影闭环
     - 标注对 Bridge/本地 skill/Agent 侧的影响
   tasks:
     - 每个任务可独立验证（含测试或联调步骤）
@@ -33,4 +35,4 @@ operations:
   archive:
     guidance:
       - 归档提交必须带 archived trailer 并 push main
-      - 归档后核对 Multica 卡 done 与（v2）GitLab Issue 关闭
+      - 正常归档核对 Multica 卡 done 与 GitLab Issue 关闭；废弃归档使用 specwire::abandoned Issue 标签，核对 Multica 卡 cancelled 与 GitLab Issue 关闭
