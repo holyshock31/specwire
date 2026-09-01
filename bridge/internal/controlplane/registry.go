@@ -98,6 +98,13 @@ func (s *RegistryService) ListDataModels(ctx context.Context, workspaceID domain
 	return s.store.ListDataModels(ctx, workspaceID)
 }
 
+// AllowlistedAdapterOperations exposes the deployed adapter catalog to the
+// admin UI as metadata only. Registration still goes through
+// ValidateBehavior, so the client cannot introduce an executable operation.
+func (s *RegistryService) AllowlistedAdapterOperations() []string {
+	return append([]string(nil), s.allowlist...)
+}
+
 func (s *RegistryService) SetConnectorTypeStatus(ctx context.Context, workspaceID, itemID domain.ID, status domain.ConnectorStatus) error {
 	return s.store.SetConnectorTypeStatus(ctx, workspaceID, itemID, status)
 }

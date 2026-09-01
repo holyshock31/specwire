@@ -11,7 +11,7 @@ SpecWire MUST represent an active Connection as the Workspace-scoped binding of 
 #### Scenario: Connection 下创建多个生命周期 Flow
 
 - **WHEN** an operator has configured a Connection between a GitLab project and a Multica project
-- **THEN** the operator can create separate publish and archive Flows under that Connection, and each Flow resolves its default source and target from the Connection
+- **THEN** the operator can create separate publish and archive Flows under that Connection, while SpecWire maintains the reserved abandon Flow for the controlled `specwire::abandoned` label route; each Flow resolves its default source and target from the Connection
 
 #### Scenario: Flow 不能跨 Workspace 引用项目
 
@@ -78,12 +78,12 @@ The Flow Builder MUST allow an author to create a draft from a template or an em
 
 ### Requirement: DataModel 是节点之间的独立数据契约
 
-SpecWire MUST maintain a declarative, versioned DataModel registry. A DataModel definition MUST describe its schema, required fields, type information, extension-field policy, and any platform semantic roles. Built-in models MUST be delivered as declarative registry definitions rather than scattered provider-specific code. The MVP registry MUST provide `ChangePublication.v1`, `ArchiveCompletion.v1`, `MulticaCreateIssueInput.v1`, and `MulticaCompleteIssueInput.v1` with the required fields, roles, and defaults defined by the published change contract. An administrator MAY add a new model or model version, but MUST NOT mutate a published model version in place. A DataModel is a port or edge contract in a Flow and is not required to be a visible canvas node.
+SpecWire MUST maintain a declarative, versioned DataModel registry. A DataModel definition MUST describe its schema, required fields, type information, extension-field policy, and any platform semantic roles. Built-in models MUST be delivered as declarative registry definitions rather than scattered provider-specific code. The MVP registry MUST provide `ChangePublication.v1`, `ArchiveCompletion.v1`, `ChangeLifecycle.v1`, `MulticaCreateIssueInput.v1`, and `MulticaCompleteIssueInput.v1` with the required fields, roles, and defaults defined by the published change contract. An administrator MAY add a new model or model version, but MUST NOT mutate a published model version in place. A DataModel is a port or edge contract in a Flow and is not required to be a visible canvas node.
 
 #### Scenario: 系统提供内置数据模型
 
 - **WHEN** an administrator creates a Flow for the supported GitLab-to-Multica lifecycle
-- **THEN** the model registry offers versioned built-in models such as `ChangePublication.v1`, `ArchiveCompletion.v1`, and the target action input models
+- **THEN** the model registry offers versioned built-in models such as `ChangePublication.v1`, `ArchiveCompletion.v1`, `ChangeLifecycle.v1`, and the target action input models
 
 #### Scenario: 管理员新增模型版本
 
@@ -228,3 +228,27 @@ The Flow Builder MUST support a simulation using a sample event with external ac
 
 - **WHEN** a user views an execution or audit record
 - **THEN** credential values, OAuth tokens, signing secrets, and authorization codes are redacted or absent
+
+### Requirement: 执行结果与人工关注状态分离
+
+SpecWire MUST keep the execution outcome (`status`) separate from the operator attention state (`attention_status`). A failed, indeterminate, or reconciliation-required execution MUST default to `open` attention, while queued, running, succeeded, and skipped executions MUST have `none` attention. An authorized operator MAY acknowledge an actionable execution or reopen it for attention. Acknowledging MUST NOT change the execution outcome, delete the historical record, or imply that the external side effect succeeded. Alert counts and active execution attention summaries MUST include only actionable executions whose attention state is `open`; retry or repair MUST clear the attention state while the execution is queued, and a subsequent failure MUST reopen it. Every attention state mutation MUST record the actor and time in the execution record and an audit event.
+
+#### Scenario: 已知晓不改写失败结果
+
+- **WHEN** an authorized operator acknowledges a failed, indeterminate, or reconciliation-required execution
+- **THEN** the execution remains in its original outcome status and history, its attention state becomes `acknowledged`, and it is removed from the active execution alert count
+
+#### Scenario: 可以重新打开关注项
+
+- **WHEN** an operator reopens an acknowledged actionable execution
+- **THEN** its attention state becomes `open`, the original outcome remains unchanged, and it appears again in active execution alerts
+
+#### Scenario: 重试清除旧关注状态
+
+- **WHEN** an operator retries or repairs an actionable execution
+- **THEN** the queued execution has `none` attention; if the attempt fails again, the new failure is stored as `open`
+
+#### Scenario: 已成功记录不允许标记关注
+
+- **WHEN** an operator attempts to acknowledge or reopen a queued, running, succeeded, or skipped execution
+- **THEN** the mutation is rejected and the execution record remains unchanged

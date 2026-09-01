@@ -18,20 +18,20 @@ import (
 
 const maxResponseBytes = 4 << 20
 
-// Client is the GitLab control-plane adapter.  The adapter accepts an
-// operation credential when one is available, while defaultToken exists only
-// for the legacy single-instance bootstrap path.  Neither value is ever
-// copied into a domain object or an error message.
+// Client is the GitLab control-plane adapter. Every provider request must
+// receive a credential resolved from the persistent control plane. The client
+// deliberately has no process-level token slot: legacy configuration is
+// imported by the application before it reaches this adapter and is never a
+// request-time fallback.
 type Client struct {
-	httpClient   *http.Client
-	defaultToken string
+	httpClient *http.Client
 }
 
-func NewClient(httpClient *http.Client, defaultToken string) *Client {
+func NewClient(httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
-	return &Client{httpClient: httpClient, defaultToken: strings.TrimSpace(defaultToken)}
+	return &Client{httpClient: httpClient}
 }
 
 type apiError struct {
@@ -218,6 +218,17 @@ func sameHookEndpoint(left, right string) bool {
 	return a.Scheme == b.Scheme && a.Host == b.Host && a.Path == b.Path
 }
 
+func (c *Client) NoteIssue(ctx context.Context, instance domain.GitLabInstance, project provider.GitLabProject, iid int, body string, credential *provider.Credential) error {
+	if iid <= 0 {
+		return fmt.Errorf("%w: GitLab issue IID must be positive", domain.ErrInvalid)
+	}
+	if strings.TrimSpace(body) == "" {
+		return fmt.Errorf("%w: GitLab issue note body is required", domain.ErrInvalid)
+	}
+	_, _, err := c.do(ctx, instance, credential, http.MethodPost, projectPath(project)+"/issues/"+strconv.Itoa(iid)+"/notes", nil, url.Values{"body": []string{body}})
+	return err
+}
+
 func (c *Client) CloseIssue(ctx context.Context, instance domain.GitLabInstance, project provider.GitLabProject, iid int, credential *provider.Credential) error {
 	if iid <= 0 {
 		return fmt.Errorf("%w: GitLab issue IID must be positive", domain.ErrInvalid)
@@ -323,13 +334,13 @@ func (c *Client) do(ctx context.Context, instance domain.GitLabInstance, credent
 }
 
 func (c *Client) token(credential *provider.Credential) (string, error) {
-	if credential != nil && len(credential.Material) != 0 {
-		return string(credential.Material), nil
+	if credential == nil || len(credential.Material) == 0 {
+		return "", &provider.ProviderError{Provider: domain.ProviderGitLab, Operation: "authenticate", Category: provider.ErrorUnauthorized, Err: provider.ErrNotConfigured}
 	}
-	if c.defaultToken != "" {
-		return c.defaultToken, nil
+	if err := credential.Validate(); err != nil {
+		return "", &provider.ProviderError{Provider: domain.ProviderGitLab, Operation: "authenticate", Category: provider.ErrorUnauthorized, Err: err}
 	}
-	return "", &provider.ProviderError{Provider: domain.ProviderGitLab, Operation: "authenticate", Category: provider.ErrorUnauthorized, Err: provider.ErrNotConfigured}
+	return string(credential.Material), nil
 }
 
 func (c *Client) invalidResponse(operation string, err error) error {

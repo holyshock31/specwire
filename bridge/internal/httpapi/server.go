@@ -12,6 +12,7 @@ import (
 	"specwire/bridge/internal/auth"
 	"specwire/bridge/internal/controlplane"
 	"specwire/bridge/internal/domain"
+	"specwire/bridge/internal/provider"
 )
 
 const (
@@ -87,6 +88,12 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if s.integration != nil && s.integration.BootstrapWorkspace != nil {
+		if err := s.integration.BootstrapWorkspace(r.Context(), workspace); err != nil {
+			writeError(w, fmt.Errorf("bootstrap Workspace catalog: %w", err))
+			return
+		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"account": account, "workspace": workspace})
 }
@@ -376,21 +383,71 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func writeError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	message := "internal server error"
+	code := "internal_error"
+	requestID := ""
+	detail := ""
 	switch {
 	case errors.Is(err, ErrUnauthorized), errors.Is(err, auth.ErrInvalidCredentials), errors.Is(err, auth.ErrInvalidSession):
-		status, message = http.StatusUnauthorized, "unauthorized"
+		status, message, code = http.StatusUnauthorized, "unauthorized", "session_unauthorized"
 	case errors.Is(err, auth.ErrCSRF):
-		status, message = http.StatusForbidden, "csrf validation failed"
+		status, message, code = http.StatusForbidden, "csrf validation failed", "csrf_failed"
 	case errors.Is(err, domain.ErrForbidden):
-		status, message = http.StatusForbidden, "forbidden"
+		status, message, code = http.StatusForbidden, "forbidden", "forbidden"
 	case errors.Is(err, domain.ErrNotFound):
-		status, message = http.StatusNotFound, "not found"
+		status, message, code = http.StatusNotFound, "not found", "not_found"
 	case errors.Is(err, domain.ErrConflict):
-		status, message = http.StatusConflict, "conflict"
+		status, message, code = http.StatusConflict, "conflict", "conflict"
 	case errors.Is(err, controlplane.ErrCapabilityUnavailable):
-		status, message = http.StatusUnprocessableEntity, "required provider capability is unavailable"
+		status, message, code = http.StatusUnprocessableEntity, "required provider capability is unavailable; update the configured provider credential", "provider_capability_unavailable"
 	case errors.Is(err, domain.ErrInvalid):
-		status, message = http.StatusBadRequest, "invalid request"
+		status, message, code = http.StatusBadRequest, "invalid request", "invalid_request"
+		detail = publicInvalidDetail(err)
 	}
-	writeJSON(w, status, map[string]any{"error": message})
+	var providerErr *provider.ProviderError
+	if errors.As(err, &providerErr) {
+		requestID = providerErr.RequestID
+		switch {
+		case errors.Is(err, provider.ErrNotConfigured):
+			status, message, code = http.StatusUnprocessableEntity, "provider credential is required; configure a persistent GitLab or Group credential", "provider_credential_required"
+		case providerErr.Category == provider.ErrorUnauthorized:
+			status, message, code = http.StatusUnauthorized, "provider credential was rejected; update the configured credential", "provider_credential_rejected"
+		case providerErr.Category == provider.ErrorForbidden:
+			status, message, code = http.StatusForbidden, "provider credential lacks the required permission", "provider_credential_forbidden"
+		case providerErr.Category == provider.ErrorNotFound:
+			status, message, code = http.StatusNotFound, "provider resource was not found; verify the selected instance, Group, or project", "provider_not_found"
+		case providerErr.Category == provider.ErrorConflict:
+			status, message, code = http.StatusConflict, "provider reports a conflicting resource", "provider_conflict"
+		case providerErr.Category == provider.ErrorRateLimited:
+			status, message, code = http.StatusTooManyRequests, "provider rate limit reached; retry later", "provider_rate_limited"
+		case providerErr.Category == provider.ErrorTimeout:
+			status, message, code = http.StatusGatewayTimeout, "provider request timed out; retry later", "provider_timeout"
+		case providerErr.Category == provider.ErrorTransient:
+			status, message, code = http.StatusBadGateway, "provider is temporarily unavailable; retry later", "provider_transient"
+		case providerErr.Category == provider.ErrorInvalidResponse:
+			status, message, code = http.StatusBadGateway, "provider returned an invalid response", "provider_invalid_response"
+		case providerErr.Category == provider.ErrorIndeterminate:
+			status, message, code = http.StatusBadGateway, "provider outcome is indeterminate; inspect the operation before retrying", "provider_indeterminate"
+		}
+	}
+	response := map[string]any{"error": message, "code": code}
+	if detail != "" && providerErr == nil {
+		response["detail"] = detail
+	}
+	if requestID != "" {
+		response["request_id"] = requestID
+	}
+	writeJSON(w, status, response)
+}
+
+func publicInvalidDetail(err error) string {
+	const prefix = "invalid domain value:"
+	message := strings.TrimSpace(err.Error())
+	if !strings.HasPrefix(message, prefix) {
+		return ""
+	}
+	detail := strings.TrimSpace(strings.TrimPrefix(message, prefix))
+	if len(detail) > 300 {
+		return detail[:300]
+	}
+	return detail
 }

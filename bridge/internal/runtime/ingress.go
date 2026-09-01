@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"specwire/bridge/internal/domain"
 	"specwire/bridge/internal/flow"
@@ -282,25 +283,108 @@ func verifySignature(secret []byte, id, timestamp, signature string, body []byte
 func matchesBehavior(envelope GitLabEnvelope, behaviorKey string) bool {
 	key := strings.ToLower(strings.TrimSpace(behaviorKey))
 	switch {
+	case key == "gitlab.issue-abandon-hook":
+		return matchesAbandonIssue(envelope)
+	case key == "gitlab.issue-hook":
+		return matchesPublicationIssue(envelope)
+	case key == "gitlab.push-hook":
+		return matchesArchivePush(envelope)
 	case strings.Contains(key, "issue"):
-		if envelope.EventName != "Issue Hook" {
-			return false
-		}
-		attributes := objectValue(envelope.Payload["object_attributes"])
-		if stringValue(envelope.Payload["object_kind"]) != "issue" || stringValue(attributes["action"]) != "open" {
-			return false
-		}
-		for _, item := range arrayValues(attributes["labels"]) {
-			if stringValue(objectValue(item)["title"]) == "change" {
-				return true
-			}
-		}
-		return false
+		return matchesPublicationIssue(envelope)
 	case strings.Contains(key, "push") || strings.Contains(key, "archive"):
-		return envelope.EventName == "Push Hook" && stringValue(envelope.Payload["ref"]) == "refs/heads/main" && !isZeroSHA(stringValue(envelope.Payload["after"])) && len(archiveChangeIDs(envelope.Payload)) != 0
+		return matchesArchivePush(envelope)
 	default:
 		return false
 	}
+}
+
+func matchesPublicationIssue(envelope GitLabEnvelope) bool {
+	if envelope.EventName != "Issue Hook" {
+		return false
+	}
+	attributes := objectValue(envelope.Payload["object_attributes"])
+	if stringValue(envelope.Payload["object_kind"]) != "issue" || stringValue(attributes["action"]) != "open" {
+		return false
+	}
+	return hasIssueLabel(attributes["labels"], "change")
+}
+
+func matchesArchivePush(envelope GitLabEnvelope) bool {
+	return envelope.EventName == "Push Hook" &&
+		stringValue(envelope.Payload["ref"]) == "refs/heads/main" &&
+		!isZeroSHA(stringValue(envelope.Payload["after"])) &&
+		hasArchivedLifecycleTrailer(envelope.Payload)
+}
+
+const abandonLabel = "specwire::abandoned"
+
+func matchesAbandonIssue(envelope GitLabEnvelope) bool {
+	if envelope.EventName != "Issue Hook" || stringValue(envelope.Payload["object_kind"]) != "issue" {
+		return false
+	}
+	attributes := objectValue(envelope.Payload["object_attributes"])
+	if stringValue(attributes["action"]) != "update" || issueChangeID(envelope.Payload) == "" {
+		return false
+	}
+	if !hasIssueLabel(attributes["labels"], abandonLabel) {
+		return false
+	}
+	changes, hasChanges := envelope.Payload["changes"].(map[string]any)
+	if !hasChanges {
+		// An update without an explicit label diff may be caused by Bridge's
+		// own description/note/close follow-up.  The abandon protocol is a
+		// transition, not a level-triggered "label is present" condition.
+		return false
+	}
+	labelChanges, hasLabelChanges := changes["labels"].(map[string]any)
+	if !hasLabelChanges {
+		return false
+	}
+	return hasIssueLabel(labelChanges["current"], abandonLabel) &&
+		!hasIssueLabel(labelChanges["previous"], abandonLabel)
+}
+
+func hasIssueLabel(value any, wanted string) bool {
+	for _, item := range arrayValues(value) {
+		if stringValue(objectValue(item)["title"]) == wanted || stringValue(objectValue(item)["name"]) == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func issueChangeID(payload map[string]any) string {
+	attributes := objectValue(payload["object_attributes"])
+	fields := parseDescriptionFields(stringValue(attributes["description"]))
+	return firstNonEmpty(fields["change_id"], stringValue(payload["change_id"]))
+}
+
+func issueAbandonReason(payload map[string]any) string {
+	attributes := objectValue(payload["object_attributes"])
+	fields := parseDescriptionFields(stringValue(attributes["description"]))
+	reason := firstNonEmpty(
+		stringValue(payload["lifecycle_reason"]),
+		fields["specwire_reason"],
+		fields["specwire-reason"],
+		fields["abandon_reason"],
+		fields["abandon-reason"],
+		fields["reason"],
+		"GitLab Issue 添加 specwire::abandoned 标签",
+	)
+	reason = strings.TrimSpace(reason)
+	if strings.ContainsAny(reason, "\r\n") || utf8.RuneCountInString(reason) > maxLifecycleReasonRunes {
+		return "GitLab Issue 添加 specwire::abandoned 标签"
+	}
+	return reason
+}
+
+func hasArchivedLifecycleTrailer(payload map[string]any) bool {
+	for _, trailer := range lifecycleTrailers(payload) {
+		if trailer.Event == "archived" {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesEventFilter(payload map[string]any, raw map[string]any) bool {
@@ -320,21 +404,104 @@ func matchesEventFilter(payload map[string]any, raw map[string]any) bool {
 }
 
 func eventPayloads(envelope GitLabEnvelope) []map[string]any {
+	if envelope.EventName == "Issue Hook" && matchesAbandonIssue(envelope) {
+		payload := cloneMap(envelope.Payload)
+		payload["change_id"] = issueChangeID(envelope.Payload)
+		payload["source_project"] = envelope.SourceProjectPath
+		payload["target_ref"] = "refs/heads/main"
+		payload["provider_delivery_id"] = envelope.DeliveryID
+		payload["lifecycle_event"] = "abandoned"
+		payload["lifecycle_reason"] = issueAbandonReason(envelope.Payload)
+		attributes := objectValue(envelope.Payload["object_attributes"])
+		if iid := intValue(attributes["iid"]); iid != 0 {
+			payload["issue_iid"] = iid
+		}
+		if url := firstNonEmpty(stringValue(attributes["url"]), stringValue(attributes["web_url"])); url != "" {
+			payload["issue_url"] = url
+		}
+		return []map[string]any{payload}
+	}
 	if envelope.EventName != "Push Hook" {
 		return []map[string]any{cloneMap(envelope.Payload)}
 	}
-	ids := archiveChangeIDs(envelope.Payload)
-	result := make([]map[string]any, 0, len(ids))
-	for _, id := range ids {
+	trailers := archivedLifecycleTrailers(envelope.Payload)
+	result := make([]map[string]any, 0, len(trailers))
+	for _, trailer := range trailers {
 		payload := cloneMap(envelope.Payload)
-		payload["change_id"] = id
+		payload["change_id"] = trailer.ChangeID
 		payload["provider_delivery_id"] = envelope.DeliveryID
+		payload["lifecycle_event"] = trailer.Event
+		if trailer.Reason != "" {
+			payload["lifecycle_reason"] = trailer.Reason
+		}
 		result = append(result, payload)
 	}
 	return result
 }
 
 func archiveChangeIDs(payload map[string]any) []string {
+	seen := map[string]bool{}
+	var result []string
+	for _, trailer := range lifecycleTrailers(payload) {
+		if trailer.Event == "archived" && !seen[trailer.ChangeID] {
+			seen[trailer.ChangeID] = true
+			result = append(result, trailer.ChangeID)
+		}
+	}
+	return result
+}
+
+func archiveTrailer(message string) (string, bool) {
+	trailer, ok := parseLifecycleTrailer(message)
+	return trailer.ChangeID, ok && trailer.Event == "archived"
+}
+
+type lifecycleTrailer struct {
+	Event    string
+	Status   string
+	ChangeID string
+	Reason   string
+}
+
+const maxLifecycleReasonRunes = 1000
+
+func lifecycleTrailers(payload map[string]any) []lifecycleTrailer {
+	messages := commitMessages(payload)
+	seen := map[string]bool{}
+	result := make([]lifecycleTrailer, 0, len(messages))
+	for index := len(messages) - 1; index >= 0; index-- {
+		trailer, ok := parseLifecycleTrailer(messages[index])
+		if !ok {
+			continue
+		}
+		key := trailer.Event + ":" + trailer.ChangeID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, trailer)
+	}
+	return result
+}
+
+func acceptedLifecycleTrailers(payload map[string]any) []lifecycleTrailer {
+	return archivedLifecycleTrailers(payload)
+}
+
+func archivedLifecycleTrailers(payload map[string]any) []lifecycleTrailer {
+	if stringValue(payload["ref"]) != "refs/heads/main" || isZeroSHA(stringValue(payload["after"])) {
+		return nil
+	}
+	var result []lifecycleTrailer
+	for _, trailer := range lifecycleTrailers(payload) {
+		if trailer.Event == "archived" {
+			result = append(result, trailer)
+		}
+	}
+	return result
+}
+
+func commitMessages(payload map[string]any) []string {
 	var messages []string
 	if head := objectValue(payload["head_commit"]); head != nil {
 		messages = append(messages, stringValue(head["message"]))
@@ -342,37 +509,67 @@ func archiveChangeIDs(payload map[string]any) []string {
 	for _, commit := range arrayValues(payload["commits"]) {
 		messages = append(messages, stringValue(objectValue(commit)["message"]))
 	}
-	seen := map[string]bool{}
-	var result []string
-	for index := len(messages) - 1; index >= 0; index-- {
-		changeID, ok := archiveTrailer(messages[index])
-		if ok && !seen[changeID] {
-			seen[changeID] = true
-			result = append(result, changeID)
-		}
-	}
-	return result
+	return messages
 }
 
-func archiveTrailer(message string) (string, bool) {
-	var event, change string
+func parseLifecycleTrailer(message string) (lifecycleTrailer, bool) {
+	var trailer lifecycleTrailer
 	for _, line := range strings.Split(message, "\n") {
 		line = strings.TrimSpace(line)
 		if value, ok := strings.CutPrefix(line, "SpecWire-Event:"); ok {
-			event = strings.TrimSpace(value)
+			trailer.Event = strings.TrimSpace(value)
+		}
+		if value, ok := strings.CutPrefix(line, "SpecWire-Status:"); ok {
+			trailer.Status = strings.TrimSpace(value)
 		}
 		if value, ok := strings.CutPrefix(line, "SpecWire-Change:"); ok {
-			change = strings.TrimSpace(value)
+			trailer.ChangeID = strings.TrimSpace(value)
+		}
+		if value, ok := strings.CutPrefix(line, "SpecWire-Reason:"); ok {
+			trailer.Reason = strings.TrimSpace(value)
 		}
 	}
-	return change, event == "archived" && change != ""
+	if trailer.Event != "archived" && trailer.Event != "abandoned" || trailer.ChangeID == "" {
+		return lifecycleTrailer{}, false
+	}
+	if trailer.Status != "" && trailer.Status != trailer.Event {
+		return lifecycleTrailer{}, false
+	}
+	if trailer.Event == "abandoned" {
+		if trailer.Status != "abandoned" || trailer.Reason == "" || strings.ContainsAny(trailer.Reason, "\r\n") || utf8.RuneCountInString(trailer.Reason) > maxLifecycleReasonRunes {
+			return lifecycleTrailer{}, false
+		}
+	}
+	return trailer, true
+}
+
+func abandonedRefMatches(ref, changeID string) bool {
+	changeID = strings.TrimSpace(changeID)
+	return ref == "refs/heads/change/feat-"+changeID || ref == "refs/heads/change/fix-"+changeID
+}
+
+func lifecycleTrailerForPayload(payload map[string]any) (lifecycleTrailer, bool) {
+	trailers := archivedLifecycleTrailers(payload)
+	if len(trailers) == 0 {
+		return lifecycleTrailer{}, false
+	}
+	return trailers[0], true
 }
 
 func actionIdentity(eventName, delivery string, payload map[string]any) string {
 	change := firstString(payload["change_id"], publicationField(payload, "change_id"))
 	if change != "" {
+		if lifecycleEvent := stringValue(payload["lifecycle_event"]); lifecycleEvent == "abandoned" {
+			return "lifecycle:abandoned:" + change
+		}
 		if eventName == "Push Hook" {
-			return "archive:" + change
+			lifecycleEvent := stringValue(payload["lifecycle_event"])
+			if lifecycleEvent == "" {
+				if trailer, ok := lifecycleTrailerForPayload(payload); ok {
+					lifecycleEvent = trailer.Event
+				}
+			}
+			return "lifecycle:" + firstNonEmpty(lifecycleEvent, "archived") + ":" + change
 		}
 		sha := firstString(payload["branch_head_sha"], publicationField(payload, "branch_head_sha"))
 		return "publication:" + change + ":" + sha
@@ -413,9 +610,20 @@ func digest(values ...string) string {
 }
 
 func actionDeliveryID(envelope GitLabEnvelope, payload map[string]any) string {
+	if envelope.EventName == "Issue Hook" && stringValue(payload["lifecycle_event"]) == "abandoned" {
+		if change := stringValue(payload["change_id"]); change != "" {
+			return envelope.DeliveryID + ":abandoned:" + change
+		}
+	}
 	if envelope.EventName == "Push Hook" {
 		if change := stringValue(payload["change_id"]); change != "" {
-			return envelope.DeliveryID + ":" + change
+			lifecycleEvent := stringValue(payload["lifecycle_event"])
+			if lifecycleEvent == "" {
+				if trailer, ok := lifecycleTrailerForPayload(payload); ok {
+					lifecycleEvent = trailer.Event
+				}
+			}
+			return envelope.DeliveryID + ":" + firstNonEmpty(lifecycleEvent, "archived") + ":" + change
 		}
 	}
 	return envelope.DeliveryID

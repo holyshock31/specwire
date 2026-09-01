@@ -282,6 +282,47 @@ func (s *Store) UpdateGitLabCapabilities(ctx context.Context, workspaceID, insta
 	return s.updateEndpointCapabilities(ctx, "gitlab_instances", workspaceID, instanceID, capabilities)
 }
 
+// UpdateGitLabInstanceCredential attaches an already-encrypted SecretRef to
+// a Workspace-owned GitLab endpoint. The secret material is intentionally
+// handled by the security.Vault, never by this repository method.
+func (s *Store) UpdateGitLabInstanceCredential(ctx context.Context, workspaceID, instanceID domain.ID, ref *domain.SecretRef) error {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	if ref == nil {
+		return fmt.Errorf("%w: GitLab credential reference is required", domain.ErrInvalid)
+	}
+	if err := ref.Validate(); err != nil {
+		return err
+	}
+	if ref.WorkspaceID != workspaceID {
+		return fmt.Errorf("%w: GitLab credential belongs to another workspace", domain.ErrForbidden)
+	}
+	var secretWorkspace domain.ID
+	var secretAlias string
+	var secretKind domain.SecretKind
+	if err := s.db.QueryRowContext(ctx, `SELECT workspace_id, alias, kind FROM secrets WHERE ref_id = ?`, ref.ID).Scan(&secretWorkspace, &secretAlias, &secretKind); err == sql.ErrNoRows {
+		return fmt.Errorf("%w: GitLab credential secret %s", domain.ErrNotFound, ref.ID)
+	} else if err != nil {
+		return fmt.Errorf("check GitLab credential secret: %w", err)
+	}
+	if secretWorkspace != workspaceID || secretAlias != ref.Alias || secretKind != ref.Kind {
+		return fmt.Errorf("%w: GitLab credential secret metadata mismatch", domain.ErrForbidden)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE gitlab_instances SET credential_ref_id = ? WHERE workspace_id = ? AND id = ?`, ref.ID, workspaceID, instanceID)
+	if err != nil {
+		return constraintError("update GitLab instance credential", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("%w: GitLab instance %s", domain.ErrNotFound, instanceID)
+	}
+	return nil
+}
+
 func (s *Store) UpdateMulticaCapabilities(ctx context.Context, workspaceID, instanceID domain.ID, capabilities []string) error {
 	return s.updateEndpointCapabilities(ctx, "multica_instances", workspaceID, instanceID, capabilities)
 }

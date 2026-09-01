@@ -22,6 +22,11 @@ func (f *fakeGroupProbe) ProbeGitLabGroup(_ context.Context, _ domain.GitLabInst
 	return f.results, f.err
 }
 
+func (f *fakeGroupProbe) ProbeGitLabCredential(_ context.Context, _ domain.GitLabInstance, material []byte) ([]domain.CapabilityResult, error) {
+	f.seen = append(f.seen, append([]byte(nil), material...))
+	return f.results, f.err
+}
+
 func newCredentialServiceFixture(t *testing.T, probe *fakeGroupProbe) (*CredentialService, *store.Store, domain.GitLabInstance, domain.GitLabGroupBinding) {
 	t.Helper()
 	s, err := store.Open(filepath.Join(t.TempDir(), "credentials.db"))
@@ -124,5 +129,50 @@ func TestGroupCredentialTransientFailureIsRetryable(t *testing.T) {
 	_, err := service.BindGroupCredential(context.Background(), instance, binding, "profile-transient", "transient", domain.CredentialPAT, ref, []byte("private"), nil)
 	if !errors.Is(err, ErrProviderTransient) {
 		t.Fatalf("transient error = %v", err)
+	}
+}
+
+func TestGitLabInstanceCredentialIsPersistedForInitialDiscovery(t *testing.T) {
+	probe := &fakeGroupProbe{results: []domain.CapabilityResult{{Capability: "gitlab.groups.read", Available: true}}}
+	service, s, instance, _ := newCredentialServiceFixture(t, probe)
+	ctx := context.Background()
+	ref := domain.SecretRef{ID: "secret-instance", WorkspaceID: instance.WorkspaceID, Alias: "instance-discovery", Kind: domain.SecretGroupCredential}
+	attached, results, err := service.BindGitLabInstanceCredential(ctx, instance, ref.Alias, domain.CredentialPAT, ref, []byte("instance-secret"), []string{"gitlab.groups.read"})
+	if err != nil {
+		t.Fatalf("bind instance credential: %v", err)
+	}
+	if attached != ref || len(results) != 1 || len(probe.seen) != 1 || string(probe.seen[0]) != "instance-secret" {
+		t.Fatalf("instance credential result = %+v, results=%+v, probe=%q", attached, results, probe.seen)
+	}
+	loaded, err := s.GetGitLabInstance(ctx, instance.WorkspaceID, instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CredentialRef == nil || *loaded.CredentialRef != ref {
+		t.Fatalf("persisted instance credential = %+v", loaded.CredentialRef)
+	}
+	material, err := service.vault.Resolve(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(material) != "instance-secret" {
+		t.Fatalf("resolved material = %q", material)
+	}
+	clear(material)
+}
+
+func TestGitLabInstanceCredentialCapabilityFailureDoesNotAttach(t *testing.T) {
+	probe := &fakeGroupProbe{results: []domain.CapabilityResult{{Capability: "gitlab.groups.read", Available: false, Reason: "forbidden"}}}
+	service, s, instance, _ := newCredentialServiceFixture(t, probe)
+	ref := domain.SecretRef{ID: "secret-instance-denied", WorkspaceID: instance.WorkspaceID, Alias: "instance-denied", Kind: domain.SecretGroupCredential}
+	if _, _, err := service.BindGitLabInstanceCredential(context.Background(), instance, ref.Alias, domain.CredentialPAT, ref, []byte("instance-secret"), []string{"gitlab.groups.read"}); !errors.Is(err, ErrCapabilityUnavailable) {
+		t.Fatalf("capability error = %v", err)
+	}
+	loaded, err := s.GetGitLabInstance(context.Background(), instance.WorkspaceID, instance.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CredentialRef != nil {
+		t.Fatalf("denied instance credential was attached: %+v", loaded.CredentialRef)
 	}
 }

@@ -116,6 +116,42 @@ const (
 	ExecutionReconciliationNeeded ExecutionStatus = "reconciliation-required"
 )
 
+// ExecutionAttentionStatus is an operator-facing state that is deliberately
+// separate from ExecutionStatus. Acknowledging a failed execution records
+// that a human has seen it; it never changes the execution outcome or removes
+// the execution from history.
+type ExecutionAttentionStatus string
+
+const (
+	ExecutionAttentionNone         ExecutionAttentionStatus = "none"
+	ExecutionAttentionOpen         ExecutionAttentionStatus = "open"
+	ExecutionAttentionAcknowledged ExecutionAttentionStatus = "acknowledged"
+)
+
+// IsActionableExecutionStatus identifies execution outcomes that require an
+// operator decision or recovery action. Queued/running and terminal success
+// or skip states are not attention items.
+func IsActionableExecutionStatus(status ExecutionStatus) bool {
+	switch status {
+	case ExecutionFailed, ExecutionIndeterminate, ExecutionReconciliationNeeded:
+		return true
+	default:
+		return false
+	}
+}
+
+// ProjectionLifecycleStatus records the lifecycle of a provider-side issue
+// projection created from a source change. It is separate from the Flow
+// execution outcome: a successful execution may have moved the projection to
+// done or cancelled, while a failed execution may leave it active.
+type ProjectionLifecycleStatus string
+
+const (
+	ProjectionActive    ProjectionLifecycleStatus = "active"
+	ProjectionDone      ProjectionLifecycleStatus = "done"
+	ProjectionCancelled ProjectionLifecycleStatus = "cancelled"
+)
+
 type NodeExecutionStatus string
 
 const (
@@ -348,6 +384,22 @@ type Connection struct {
 	CreatedBy            ID                 `json:"created_by"`
 }
 
+// ConnectionStats is a read-only aggregate used by control-plane list views.
+// It deliberately does not become part of the Connection persistence model:
+// counts and health are derived from the Workspace-scoped records below it.
+type ConnectionStats struct {
+	FlowCount                      int                      `json:"flow_count"`
+	ResourceCount                  int                      `json:"resource_count"`
+	ExecutionCount                 int                      `json:"execution_count"`
+	SuccessfulExecutionCount       int                      `json:"successful_execution_count"`
+	UnacknowledgedExecutionCount   int                      `json:"unacknowledged_execution_count"`
+	LatestExecutionStatus          ExecutionStatus          `json:"latest_execution_status,omitempty"`
+	LatestExecutionAttentionStatus ExecutionAttentionStatus `json:"latest_execution_attention_status,omitempty"`
+	LatestExecutionAt              *time.Time               `json:"latest_execution_at,omitempty"`
+	LatestOnboardingStatus         OnboardingStatus         `json:"latest_onboarding_status,omitempty"`
+	LatestOnboardingAt             *time.Time               `json:"latest_onboarding_at,omitempty"`
+}
+
 func (c Connection) Validate() error {
 	if err := requireID("id", c.ID); err != nil {
 		return err
@@ -496,23 +548,26 @@ type FlowVersion struct {
 }
 
 type FlowExecution struct {
-	ID                 ID              `json:"id"`
-	WorkspaceID        ID              `json:"workspace_id"`
-	ConnectionID       ID              `json:"connection_id"`
-	FlowID             ID              `json:"flow_id"`
-	FlowVersionID      ID              `json:"flow_version_id"`
-	FlowVersion        int             `json:"flow_version"`
-	EventID            ID              `json:"event_id"`
-	DeliveryID         string          `json:"delivery_id,omitempty"`
-	IdempotencyKey     string          `json:"idempotency_key"`
-	CorrelationID      string          `json:"correlation_id"`
-	Status             ExecutionStatus `json:"status"`
-	CurrentNodeID      ID              `json:"current_node_id,omitempty"`
-	ProviderRequestIDs []string        `json:"provider_request_ids,omitempty"`
-	ErrorCategory      string          `json:"error_category,omitempty"`
-	ErrorMessage       string          `json:"error_message,omitempty"`
-	CreatedAt          time.Time       `json:"created_at"`
-	UpdatedAt          time.Time       `json:"updated_at"`
+	ID                      ID                       `json:"id"`
+	WorkspaceID             ID                       `json:"workspace_id"`
+	ConnectionID            ID                       `json:"connection_id"`
+	FlowID                  ID                       `json:"flow_id"`
+	FlowVersionID           ID                       `json:"flow_version_id"`
+	FlowVersion             int                      `json:"flow_version"`
+	EventID                 ID                       `json:"event_id"`
+	DeliveryID              string                   `json:"delivery_id,omitempty"`
+	IdempotencyKey          string                   `json:"idempotency_key"`
+	CorrelationID           string                   `json:"correlation_id"`
+	Status                  ExecutionStatus          `json:"status"`
+	AttentionStatus         ExecutionAttentionStatus `json:"attention_status"`
+	AttentionActorAccountID ID                       `json:"attention_actor_account_id,omitempty"`
+	AttentionUpdatedAt      *time.Time               `json:"attention_updated_at,omitempty"`
+	CurrentNodeID           ID                       `json:"current_node_id,omitempty"`
+	ProviderRequestIDs      []string                 `json:"provider_request_ids,omitempty"`
+	ErrorCategory           string                   `json:"error_category,omitempty"`
+	ErrorMessage            string                   `json:"error_message,omitempty"`
+	CreatedAt               time.Time                `json:"created_at"`
+	UpdatedAt               time.Time                `json:"updated_at"`
 }
 
 type NodeExecution struct {
@@ -572,17 +627,19 @@ type AuditEvent struct {
 }
 
 type Correlation struct {
-	ID                  ID        `json:"id"`
-	WorkspaceID         ID        `json:"workspace_id"`
-	ConnectionID        ID        `json:"connection_id"`
-	SourceIdentity      string    `json:"source_identity"`
-	SourceIssueIID      int       `json:"source_issue_iid,omitempty"`
-	SourceIssueIIDs     []int     `json:"source_issue_iids,omitempty"`
-	PublicationIdentity string    `json:"publication_identity"`
-	TargetIdentity      string    `json:"target_identity,omitempty"`
-	FlowExecutionID     ID        `json:"flow_execution_id,omitempty"`
-	ProviderRequestID   string    `json:"provider_request_id,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
+	ID                  ID                        `json:"id"`
+	WorkspaceID         ID                        `json:"workspace_id"`
+	ConnectionID        ID                        `json:"connection_id"`
+	FlowID              ID                        `json:"flow_id"`
+	SourceIdentity      string                    `json:"source_identity"`
+	SourceIssueIID      int                       `json:"source_issue_iid,omitempty"`
+	SourceIssueIIDs     []int                     `json:"source_issue_iids,omitempty"`
+	PublicationIdentity string                    `json:"publication_identity"`
+	TargetIdentity      string                    `json:"target_identity,omitempty"`
+	FlowExecutionID     ID                        `json:"flow_execution_id,omitempty"`
+	ProviderRequestID   string                    `json:"provider_request_id,omitempty"`
+	LifecycleStatus     ProjectionLifecycleStatus `json:"lifecycle_status"`
+	CreatedAt           time.Time                 `json:"created_at"`
 }
 
 type IdempotencyKey struct {

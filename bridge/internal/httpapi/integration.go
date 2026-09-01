@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"specwire/bridge/internal/auth"
 	"specwire/bridge/internal/controlplane"
@@ -22,6 +23,7 @@ import (
 // constructor used by the legacy API to stay unchanged.
 type IntegrationStore interface {
 	ListConnections(context.Context, domain.ID) ([]domain.Connection, error)
+	GetConnectionStats(context.Context, domain.ID, domain.ID) (domain.ConnectionStats, error)
 	GetConnection(context.Context, domain.ID, domain.ID) (domain.Connection, error)
 	DisableConnection(context.Context, domain.ID, domain.ID) error
 	ListManagedResources(context.Context, domain.ID, domain.ID) ([]domain.ManagedResource, error)
@@ -38,8 +40,10 @@ type IntegrationStore interface {
 	GetFlowVersion(context.Context, domain.ID, domain.ID, int) (domain.FlowVersion, error)
 	ListFlowTemplates(context.Context, domain.ID) ([]domain.FlowTemplate, error)
 	GetMulticaWorkspace(context.Context, domain.ID, domain.ID, string) (domain.MulticaWorkspaceRef, error)
+	GetMulticaWorkspaceByID(context.Context, domain.ID, domain.ID, domain.ID) (domain.MulticaWorkspaceRef, error)
 	GetMulticaProject(context.Context, domain.ID, domain.ID, string) (domain.MulticaProjectRef, error)
 	ListFlowExecutions(context.Context, domain.ID, domain.ID, domain.ID, int) ([]domain.FlowExecution, error)
+	ListInboundEvents(context.Context, domain.ID, domain.ID, int) ([]domain.InboundEvent, error)
 	GetFlowExecution(context.Context, domain.ID, domain.ID) (domain.FlowExecution, error)
 	ListNodeExecutions(context.Context, domain.ID, domain.ID) ([]domain.NodeExecution, error)
 	GetInboundEvent(context.Context, domain.ID, domain.ID) (domain.InboundEvent, error)
@@ -61,6 +65,10 @@ type IntegrationServices struct {
 	Flows       *flow.Service
 	Registry    *controlplane.RegistryService
 	LiveTests   *runtimenew.LiveTestService
+	// BootstrapWorkspace is invoked after the first local administrator creates
+	// a Workspace. It lets the application seed built-in registry/template
+	// definitions without coupling the auth package to the Flow package.
+	BootstrapWorkspace func(context.Context, domain.Workspace) error
 }
 
 func (s *Server) handleIntegration(w http.ResponseWriter, r *http.Request, path string) bool {
@@ -77,7 +85,11 @@ func (s *Server) handleIntegration(w http.ResponseWriter, r *http.Request, path 
 	}
 	switch parts[1] {
 	case "gitlab-instances":
-		if len(parts) >= 6 && parts[3] == "groups" && parts[5] == "credentials" {
+		if len(parts) == 4 && parts[3] == "group-bindings" {
+			s.handleGitLabGroupBindings(w, r, session, parts)
+		} else if len(parts) == 4 && parts[3] == "credentials" {
+			s.handleGitLabInstanceCredentials(w, r, session, parts)
+		} else if len(parts) >= 6 && parts[3] == "groups" && parts[5] == "credentials" {
 			s.handleGroupCredentials(w, r, session, parts)
 		} else {
 			s.handleSelectors(w, r, session, parts)
@@ -96,6 +108,10 @@ func (s *Server) handleIntegration(w http.ResponseWriter, r *http.Request, path 
 		s.handleRegistry(w, r, session, parts)
 	case "audit-events":
 		s.handleAuditEvents(w, r, session, parts)
+	case "hook-events":
+		s.handleInboundEvents(w, r, session, parts)
+	case "access-context":
+		s.handleAccessContext(w, r, session, parts)
 	}
 	return true
 }
@@ -106,10 +122,10 @@ func integrationPath(parts []string, method string) bool {
 	}
 	switch parts[1] {
 	case "gitlab-instances":
-		return len(parts) >= 4 && (parts[3] == "groups" || parts[3] == "projects")
+		return len(parts) >= 4 && (parts[3] == "groups" || parts[3] == "projects" || parts[3] == "credentials" || parts[3] == "group-bindings")
 	case "multica-instances":
 		return len(parts) >= 4 && parts[3] == "workspaces"
-	case "connections", "flow-templates", "flows", "executions", "registry", "audit-events":
+	case "connections", "flow-templates", "flows", "executions", "registry", "audit-events", "hook-events", "access-context":
 		return true
 	default:
 		return false
@@ -178,6 +194,86 @@ func (s *Server) visibleConnections(ctx context.Context, session domain.Session,
 	return visible
 }
 
+type connectionHealthSummary struct {
+	Status string     `json:"status"`
+	Source string     `json:"source,omitempty"`
+	At     *time.Time `json:"at,omitempty"`
+}
+
+// connectionListItem is a flattened read model. The embedded Connection keeps
+// the existing API shape compatible while the derived fields make the list
+// useful without requiring one detail request per row.
+type connectionListItem struct {
+	domain.Connection
+	FlowCount                      int                             `json:"flow_count"`
+	ResourceCount                  int                             `json:"resource_count"`
+	ExecutionCount                 int                             `json:"execution_count"`
+	SuccessfulExecutionCount       int                             `json:"successful_execution_count"`
+	UnacknowledgedExecutionCount   int                             `json:"unacknowledged_execution_count"`
+	LatestExecutionStatus          domain.ExecutionStatus          `json:"latest_execution_status,omitempty"`
+	LatestExecutionAttentionStatus domain.ExecutionAttentionStatus `json:"latest_execution_attention_status,omitempty"`
+	Health                         connectionHealthSummary         `json:"health"`
+}
+
+func (s *Server) connectionListItems(ctx context.Context, store IntegrationStore, connections []domain.Connection) ([]connectionListItem, error) {
+	items := make([]connectionListItem, 0, len(connections))
+	for _, connection := range connections {
+		stats, err := store.GetConnectionStats(ctx, connection.WorkspaceID, connection.ID)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, connectionListItem{
+			Connection:                     connection,
+			FlowCount:                      stats.FlowCount,
+			ResourceCount:                  stats.ResourceCount,
+			ExecutionCount:                 stats.ExecutionCount,
+			SuccessfulExecutionCount:       stats.SuccessfulExecutionCount,
+			UnacknowledgedExecutionCount:   stats.UnacknowledgedExecutionCount,
+			LatestExecutionStatus:          stats.LatestExecutionStatus,
+			LatestExecutionAttentionStatus: stats.LatestExecutionAttentionStatus,
+			Health:                         summarizeConnectionHealth(connection, stats),
+		})
+	}
+	return items, nil
+}
+
+func summarizeConnectionHealth(connection domain.Connection, stats domain.ConnectionStats) connectionHealthSummary {
+	if connection.Status == domain.ConnectionDisabled {
+		return connectionHealthSummary{Status: "disabled", Source: "connection", At: connection.DisabledAt}
+	}
+	// An older failed execution remains operationally relevant even when a
+	// newer execution succeeded.  Keep the connection attention state driven by
+	// the open attention queue, not only by the latest execution outcome.
+	if stats.UnacknowledgedExecutionCount > 0 {
+		return connectionHealthSummary{Status: "attention", Source: "execution", At: stats.LatestExecutionAt}
+	}
+	switch stats.LatestExecutionStatus {
+	case domain.ExecutionFailed, domain.ExecutionIndeterminate, domain.ExecutionReconciliationNeeded:
+		if stats.LatestExecutionAttentionStatus == domain.ExecutionAttentionAcknowledged {
+			return connectionHealthSummary{Status: "acknowledged", Source: "execution", At: stats.LatestExecutionAt}
+		}
+		return connectionHealthSummary{Status: "attention", Source: "execution", At: stats.LatestExecutionAt}
+	case domain.ExecutionQueued, domain.ExecutionRunning:
+		return connectionHealthSummary{Status: "running", Source: "execution", At: stats.LatestExecutionAt}
+	}
+	switch stats.LatestOnboardingStatus {
+	case domain.OnboardingFailed, domain.OnboardingBlocked:
+		return connectionHealthSummary{Status: "attention", Source: "onboarding", At: stats.LatestOnboardingAt}
+	case domain.OnboardingPending, domain.OnboardingRunning:
+		return connectionHealthSummary{Status: "running", Source: "onboarding", At: stats.LatestOnboardingAt}
+	}
+	switch connection.Status {
+	case domain.ConnectionReady:
+		return connectionHealthSummary{Status: "healthy", Source: "connection", At: stats.LatestOnboardingAt}
+	case domain.ConnectionConfigured:
+		return connectionHealthSummary{Status: "configured", Source: "connection", At: stats.LatestOnboardingAt}
+	case domain.ConnectionReadyFailed:
+		return connectionHealthSummary{Status: "attention", Source: "connection", At: stats.LatestOnboardingAt}
+	default:
+		return connectionHealthSummary{Status: "attention", Source: "connection", At: stats.LatestOnboardingAt}
+	}
+}
+
 func (s *Server) handleSelectors(w http.ResponseWriter, r *http.Request, session domain.Session, parts []string) {
 	workspaceID := domain.ID(parts[0])
 	if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleViewer, false) {
@@ -213,6 +309,11 @@ func (s *Server) handleSelectors(w http.ResponseWriter, r *http.Request, session
 				writeError(w, fmt.Errorf("%w: group_id is required", domain.ErrInvalid))
 				return
 			}
+			excludeBound, err := selectorBool(r.URL.Query().Get("exclude_bound"), "exclude_bound")
+			if err != nil {
+				writeError(w, err)
+				return
+			}
 			group := provider.GitLabGroup{InstanceID: instanceID, ExternalID: groupID, FullPath: strings.TrimSpace(r.URL.Query().Get("group_path")), Name: strings.TrimSpace(r.URL.Query().Get("group_name"))}
 			credentialRef := instance.CredentialRef
 			if binding, bindingErr := s.integration.Store.GetGitLabGroupBindingByGroup(r.Context(), workspaceID, instanceID, groupID); bindingErr == nil && binding.CredentialRef != nil {
@@ -225,6 +326,14 @@ func (s *Server) handleSelectors(w http.ResponseWriter, r *http.Request, session
 			if err != nil {
 				writeError(w, err)
 				return
+			}
+			if excludeBound {
+				connections, err := s.integration.Store.ListConnections(r.Context(), workspaceID)
+				if err != nil {
+					writeError(w, err)
+					return
+				}
+				items = filterBoundGitLabProjects(items, connections, instanceID)
 			}
 			writeJSON(w, http.StatusOK, items)
 		default:
@@ -252,6 +361,11 @@ func (s *Server) handleSelectors(w http.ResponseWriter, r *http.Request, session
 		return
 	}
 	if len(parts) == 6 && parts[5] == "projects" {
+		excludeBound, err := selectorBool(r.URL.Query().Get("exclude_bound"), "exclude_bound")
+		if err != nil {
+			writeError(w, err)
+			return
+		}
 		workspaceRef, err := s.integration.Store.GetMulticaWorkspace(r.Context(), workspaceID, instanceID, parts[4])
 		if err != nil {
 			writeError(w, err)
@@ -262,10 +376,209 @@ func (s *Server) handleSelectors(w http.ResponseWriter, r *http.Request, session
 			writeError(w, err)
 			return
 		}
+		if excludeBound {
+			connections, err := s.integration.Store.ListConnections(r.Context(), workspaceID)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			items = filterBoundMulticaProjects(items, connections, instanceID)
+		}
 		writeJSON(w, http.StatusOK, items)
 		return
 	}
 	http.NotFound(w, r)
+}
+
+func selectorBool(raw, name string) (bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%w: %s must be a boolean", domain.ErrInvalid, name)
+	}
+	return value, nil
+}
+
+func filterBoundGitLabProjects(items []provider.GitLabProject, connections []domain.Connection, instanceID domain.ID) []provider.GitLabProject {
+	bound := make(map[string]struct{})
+	for _, connection := range connections {
+		if connection.Status == domain.ConnectionDisabled || connection.SourceGitLabProject.InstanceID != instanceID {
+			continue
+		}
+		if projectID := strings.TrimSpace(connection.SourceGitLabProject.ExternalID); projectID != "" {
+			bound[projectID] = struct{}{}
+		}
+	}
+	filtered := make([]provider.GitLabProject, 0, len(items))
+	for _, item := range items {
+		if _, ok := bound[strings.TrimSpace(item.ExternalID)]; !ok {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func filterBoundMulticaProjects(items []domain.MulticaProjectRef, connections []domain.Connection, instanceID domain.ID) []domain.MulticaProjectRef {
+	bound := make(map[string]struct{})
+	for _, connection := range connections {
+		if connection.Status == domain.ConnectionDisabled || connection.TargetMulticaProject.InstanceID != instanceID {
+			continue
+		}
+		if projectID := strings.TrimSpace(connection.TargetMulticaProject.ExternalID); projectID != "" {
+			bound[projectID] = struct{}{}
+		}
+	}
+	filtered := make([]domain.MulticaProjectRef, 0, len(items))
+	for _, item := range items {
+		if _, ok := bound[strings.TrimSpace(item.ExternalID)]; !ok {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+// handleGitLabGroupBindings exposes only the Workspace-owned Group binding
+// metadata.  The actual credential material remains behind the credential
+// service and is represented in this response only by a redacted SecretRef.
+func (s *Server) handleGitLabGroupBindings(w http.ResponseWriter, r *http.Request, session domain.Session, parts []string) {
+	if r.Method != http.MethodGet || len(parts) != 4 {
+		http.NotFound(w, r)
+		return
+	}
+	workspaceID := domain.ID(parts[0])
+	instanceID := domain.ID(parts[2])
+	if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleViewer, false) {
+		return
+	}
+	store, ok := s.integrationStore(w)
+	if !ok {
+		return
+	}
+	reader, ok := store.(interface {
+		ListGitLabGroupBindings(context.Context, domain.ID, domain.ID) ([]domain.GitLabGroupBinding, error)
+	})
+	if !ok {
+		writeError(w, fmt.Errorf("%w: GitLab Group binding listing is not configured", domain.ErrInvalid))
+		return
+	}
+	items, err := reader.ListGitLabGroupBindings(r.Context(), workspaceID, instanceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+type inboundEventSummary struct {
+	ID                      domain.ID           `json:"id"`
+	WorkspaceID             domain.ID           `json:"workspace_id"`
+	ConnectionID            domain.ID           `json:"connection_id"`
+	Provider                domain.ProviderKind `json:"provider"`
+	SourceInstanceID        domain.ID           `json:"source_instance_id"`
+	SourceProjectExternalID string              `json:"source_project_external_id"`
+	BehaviorKey             string              `json:"behavior_key"`
+	BehaviorVersion         string              `json:"behavior_version"`
+	DeliveryID              string              `json:"delivery_id,omitempty"`
+	PayloadHash             string              `json:"payload_hash"`
+	ReceivedAt              time.Time           `json:"received_at"`
+	RetentionUntil          *time.Time          `json:"retention_until,omitempty"`
+}
+
+func summarizeInboundEvents(items []domain.InboundEvent) []inboundEventSummary {
+	result := make([]inboundEventSummary, 0, len(items))
+	for _, item := range items {
+		result = append(result, inboundEventSummary{
+			ID: item.ID, WorkspaceID: item.WorkspaceID, ConnectionID: item.ConnectionID,
+			Provider: item.Provider, SourceInstanceID: item.SourceInstanceID,
+			SourceProjectExternalID: item.SourceProjectExternalID, BehaviorKey: item.BehaviorKey,
+			BehaviorVersion: item.BehaviorVersion, DeliveryID: item.DeliveryID,
+			PayloadHash: item.PayloadHash, ReceivedAt: item.ReceivedAt, RetentionUntil: item.RetentionUntil,
+		})
+	}
+	return result
+}
+
+func (s *Server) handleInboundEvents(w http.ResponseWriter, r *http.Request, session domain.Session, parts []string) {
+	if r.Method != http.MethodGet || len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	workspaceID := domain.ID(parts[0])
+	store, ok := s.integrationStore(w)
+	if !ok {
+		return
+	}
+	connectionID := domain.ID(strings.TrimSpace(r.URL.Query().Get("connection_id")))
+	limit := parseLimit(r)
+	if !connectionID.Empty() {
+		connection, err := store.GetConnection(r.Context(), workspaceID, connectionID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if !s.authorizeConnection(w, r, session, connection, domain.RoleViewer, false) {
+			return
+		}
+		items, err := store.ListInboundEvents(r.Context(), workspaceID, connectionID, limit)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, summarizeInboundEvents(items))
+		return
+	}
+
+	connections, err := store.ListConnections(r.Context(), workspaceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	visible := s.visibleConnections(r.Context(), session, workspaceID, connections)
+	if len(visible) == 0 && len(connections) > 0 {
+		writeError(w, domain.ErrForbidden)
+		return
+	}
+	allowed := make(map[domain.ID]struct{}, len(visible))
+	for _, connection := range visible {
+		allowed[connection.ID] = struct{}{}
+	}
+	items, err := store.ListInboundEvents(r.Context(), workspaceID, "", limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	filtered := make([]domain.InboundEvent, 0, len(items))
+	for _, item := range items {
+		if _, ok := allowed[item.ConnectionID]; ok {
+			filtered = append(filtered, item)
+		}
+	}
+	writeJSON(w, http.StatusOK, summarizeInboundEvents(filtered))
+}
+
+func (s *Server) handleAccessContext(w http.ResponseWriter, r *http.Request, session domain.Session, parts []string) {
+	if r.Method != http.MethodGet || len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	workspaceID := domain.ID(parts[0])
+	if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleViewer, false) {
+		return
+	}
+	bindings, err := s.authorization.ListRoleBindings(r.Context(), session.AccountID, workspaceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"account_id":                   session.AccountID,
+		"workspace_id":                 workspaceID,
+		"bindings":                     bindings,
+		"roles":                        []string{string(domain.RoleAdmin), string(domain.RoleOperator), string(domain.RoleViewer)},
+		"provider_membership_required": false,
+	})
 }
 
 type groupCredentialRequest struct {
@@ -273,6 +586,86 @@ type groupCredentialRequest struct {
 	Kind                 domain.CredentialProfileKind `json:"kind"`
 	Secret               string                       `json:"secret"`
 	RequiredCapabilities []string                     `json:"required_capabilities,omitempty"`
+}
+
+type gitLabInstanceCredentialRequest struct {
+	Alias                string                       `json:"alias"`
+	Kind                 domain.CredentialProfileKind `json:"kind"`
+	Secret               string                       `json:"secret"`
+	RequiredCapabilities []string                     `json:"required_capabilities,omitempty"`
+}
+
+// handleGitLabInstanceCredentials configures the Workspace-level credential
+// used to discover Groups. It is deliberately available before a Group
+// binding exists; a selected Group may later receive a narrower credential
+// through handleGroupCredentials.
+func (s *Server) handleGitLabInstanceCredentials(w http.ResponseWriter, r *http.Request, session domain.Session, parts []string) {
+	if s.integration == nil || s.integration.Credentials == nil || s.endpoints == nil {
+		writeError(w, fmt.Errorf("%w: GitLab instance credential service is not configured", domain.ErrInvalid))
+		return
+	}
+	if len(parts) != 4 || parts[3] != "credentials" {
+		http.NotFound(w, r)
+		return
+	}
+	workspaceID := domain.ID(parts[0])
+	instanceID := domain.ID(parts[2])
+	instance, err := s.endpoints.GetGitLab(r.Context(), workspaceID, instanceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if r.Method == http.MethodGet {
+		if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleViewer, false) {
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"instance_id":    instance.ID,
+			"credential_ref": instance.CredentialRef,
+			"capabilities":   instance.Capabilities,
+		})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.NotFound(w, r)
+		return
+	}
+	if !s.authorizeWorkspace(w, r, session, workspaceID, domain.RoleAdmin, true) {
+		return
+	}
+	var request gitLabInstanceCredentialRequest
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	request.Alias = strings.TrimSpace(request.Alias)
+	if request.Alias == "" || strings.TrimSpace(request.Secret) == "" {
+		writeError(w, fmt.Errorf("%w: credential alias and secret are required", domain.ErrInvalid))
+		return
+	}
+	if request.Kind == "" {
+		request.Kind = domain.CredentialGroupAccessToken
+	}
+	if len(request.RequiredCapabilities) == 0 {
+		request.RequiredCapabilities = []string{"gitlab.groups.read"}
+	}
+	ref := domain.SecretRef{ID: domain.NewID(), WorkspaceID: workspaceID, Alias: request.Alias, Kind: domain.SecretGroupCredential}
+	attached, results, err := s.integration.Credentials.BindGitLabInstanceCredential(r.Context(), instance, request.Alias, request.Kind, ref, []byte(request.Secret), request.RequiredCapabilities)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r.Context(), session.AccountID, "credential.gitlab_instance.bind", "gitlab_instance", instance.ID, map[string]any{"workspace_id": workspaceID, "alias": attached.Alias, "capabilities": availableCapabilityNames(results)})
+	writeJSON(w, http.StatusCreated, map[string]any{"instance_id": instance.ID, "credential_ref": attached, "capabilities": results})
+}
+
+func availableCapabilityNames(results []domain.CapabilityResult) []string {
+	capabilities := make([]string, 0, len(results))
+	for _, result := range results {
+		if result.Available {
+			capabilities = append(capabilities, result.Capability)
+		}
+	}
+	return capabilities
 }
 
 func (s *Server) handleGroupCredentials(w http.ResponseWriter, r *http.Request, session domain.Session, parts []string) {
@@ -442,7 +835,12 @@ func (s *Server) handleConnections(w http.ResponseWriter, r *http.Request, sessi
 			writeError(w, domain.ErrForbidden)
 			return
 		}
-		writeJSON(w, http.StatusOK, visible)
+		items, err := s.connectionListItems(r.Context(), store, visible)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
 		return
 	}
 	if len(parts) == 3 && parts[2] == "onboard" {
@@ -652,7 +1050,7 @@ func (s *Server) writeOnboardingPlan(w http.ResponseWriter, r *http.Request, wor
 			}
 			return "ssh"
 		}(), "management_mark": "specwire-managed", "hook_url": hookURL, "hook_events": []string{"Issue Hook", "Push Hook"}},
-		"resources": []string{string(domain.ResourceWorkspaceRepository), string(domain.ResourceProject), string(domain.ResourceLabel)},
+		"resources": []string{string(domain.ResourceWorkspaceRepository), string(domain.ResourceProject), string(domain.ResourceLabel) + ": change", string(domain.ResourceLabel) + ": specwire::abandoned"},
 		"hook":      map[string]any{"status": "planned", "activation": "first-published-input-flow"},
 	})
 }
@@ -692,6 +1090,15 @@ func (s *Server) onboard(ctx context.Context, session domain.Session, workspaceI
 		CreateTargetProject: request.CreateTargetProject, TargetProjectTitle: request.TargetProjectTitle, PreferHTTPS: request.PreferHTTPS,
 	})
 	if err == nil {
+		if s.integration.Flows != nil {
+			if _, flowErr := s.integration.Flows.EnsureAbandonFlow(ctx, workspaceID, result.Connection.ID, session.AccountID); flowErr != nil {
+				// Onboarding is already durable at this point. A provider outage
+				// while reconciling the reserved lifecycle Flow must not make the
+				// UI report a false save failure or cause the caller to retry the
+				// whole onboarding operation. Startup/reconciliation will retry it.
+				s.audit(ctx, session.AccountID, "connection.abandon_flow.reconcile_deferred", "connection", result.Connection.ID, map[string]any{"workspace_id": workspaceID, "error": strings.TrimSpace(flowErr.Error())})
+			}
+		}
 		s.audit(ctx, session.AccountID, "connection.onboard", "connection", result.Connection.ID, map[string]any{"workspace_id": workspaceID, "operation_id": result.Operation.ID, "ready": result.Ready})
 	}
 	return result, err
@@ -721,14 +1128,42 @@ func (s *Server) resolveGroupBinding(ctx context.Context, workspaceID domain.ID,
 }
 
 type connectionDetail struct {
-	Connection domain.Connection        `json:"connection"`
-	Resources  []domain.ManagedResource `json:"resources"`
-	Hook       *domain.Hook             `json:"hook,omitempty"`
-	Routes     []domain.HookRoute       `json:"routes"`
-	Flows      []domain.Flow            `json:"flows"`
+	Connection             domain.Connection           `json:"connection"`
+	SourceGitLabInstance   *domain.GitLabInstance      `json:"source_gitlab_instance,omitempty"`
+	SourceGroup            *domain.GitLabGroupBinding  `json:"source_group,omitempty"`
+	TargetMulticaInstance  *domain.MulticaInstance     `json:"target_multica_instance,omitempty"`
+	TargetMulticaWorkspace *domain.MulticaWorkspaceRef `json:"target_multica_workspace,omitempty"`
+	Resources              []domain.ManagedResource    `json:"resources"`
+	Hook                   *domain.Hook                `json:"hook,omitempty"`
+	Routes                 []domain.HookRoute          `json:"routes"`
+	Flows                  []domain.Flow               `json:"flows"`
 }
 
 func (s *Server) writeConnectionDetail(w http.ResponseWriter, r *http.Request, store IntegrationStore, connection domain.Connection) {
+	var sourceInstance *domain.GitLabInstance
+	if s.endpoints != nil {
+		if item, endpointErr := s.endpoints.GetGitLab(r.Context(), connection.WorkspaceID, connection.SourceGitLabProject.InstanceID); endpointErr == nil {
+			sourceInstance = &item
+		}
+	}
+	var sourceGroup *domain.GitLabGroupBinding
+	if groupID := strings.TrimSpace(connection.SourceGitLabProject.GroupID); groupID != "" {
+		if item, groupErr := store.GetGitLabGroupBindingByGroup(r.Context(), connection.WorkspaceID, connection.SourceGitLabProject.InstanceID, groupID); groupErr == nil {
+			sourceGroup = &item
+		}
+	}
+	var targetInstance *domain.MulticaInstance
+	if s.endpoints != nil {
+		if item, endpointErr := s.endpoints.GetMultica(r.Context(), connection.WorkspaceID, connection.TargetMulticaProject.InstanceID); endpointErr == nil {
+			targetInstance = &item
+		}
+	}
+	var targetWorkspace *domain.MulticaWorkspaceRef
+	if project, projectErr := store.GetMulticaProject(r.Context(), connection.WorkspaceID, connection.TargetMulticaProject.InstanceID, connection.TargetMulticaProject.ExternalID); projectErr == nil && !project.MulticaWorkspaceID.Empty() {
+		if item, workspaceErr := store.GetMulticaWorkspaceByID(r.Context(), connection.WorkspaceID, connection.TargetMulticaProject.InstanceID, project.MulticaWorkspaceID); workspaceErr == nil {
+			targetWorkspace = &item
+		}
+	}
 	resources, err := store.ListManagedResources(r.Context(), connection.WorkspaceID, connection.ID)
 	if err != nil {
 		writeError(w, err)
@@ -753,7 +1188,7 @@ func (s *Server) writeConnectionDetail(w http.ResponseWriter, r *http.Request, s
 	if hookErr == nil {
 		hookPtr = &hook
 	}
-	writeJSON(w, http.StatusOK, connectionDetail{Connection: connection, Resources: resources, Hook: hookPtr, Routes: routes, Flows: flows})
+	writeJSON(w, http.StatusOK, connectionDetail{Connection: connection, SourceGitLabInstance: sourceInstance, SourceGroup: sourceGroup, TargetMulticaInstance: targetInstance, TargetMulticaWorkspace: targetWorkspace, Resources: resources, Hook: hookPtr, Routes: routes, Flows: flows})
 }
 
 func optionalHook(hook domain.Hook, present bool) any {
@@ -1202,9 +1637,50 @@ func (s *Server) handleExecutions(w http.ResponseWriter, r *http.Request, sessio
 		s.repairExecution(w, r, session, store, execution)
 	case "replay":
 		s.replayExecution(w, r, session, store, execution)
+	case "attention":
+		s.updateExecutionAttention(w, r, session, store, execution)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) updateExecutionAttention(w http.ResponseWriter, r *http.Request, session domain.Session, store IntegrationStore, execution domain.FlowExecution) {
+	if r.Method != http.MethodPost || !s.checkCSRF(w, r, session) {
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+		}
+		return
+	}
+	if !domain.IsActionableExecutionStatus(execution.Status) {
+		writeError(w, fmt.Errorf("%w: only failed or reconciliation-required executions have an attention state", domain.ErrConflict))
+		return
+	}
+	var request struct {
+		Status domain.ExecutionAttentionStatus `json:"status"`
+	}
+	if !decodeJSON(w, r, &request) {
+		return
+	}
+	if request.Status != domain.ExecutionAttentionOpen && request.Status != domain.ExecutionAttentionAcknowledged {
+		writeError(w, fmt.Errorf("%w: attention status must be open or acknowledged", domain.ErrInvalid))
+		return
+	}
+	previous := execution.AttentionStatus
+	now := time.Now().UTC()
+	execution.AttentionStatus = request.Status
+	execution.AttentionActorAccountID = session.AccountID
+	execution.AttentionUpdatedAt = &now
+	if err := store.UpdateFlowExecution(r.Context(), execution); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r.Context(), session.AccountID, "execution.attention.update", "flow_execution", execution.ID, map[string]any{
+		"workspace_id":     execution.WorkspaceID,
+		"from":             previous,
+		"to":               request.Status,
+		"execution_status": execution.Status,
+	})
+	writeJSON(w, http.StatusOK, execution)
 }
 
 type executionDetail struct {
@@ -1239,6 +1715,9 @@ func (s *Server) retryExecution(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	execution.Status = domain.ExecutionQueued
+	execution.AttentionStatus = domain.ExecutionAttentionNone
+	execution.AttentionActorAccountID = ""
+	execution.AttentionUpdatedAt = nil
 	execution.ErrorCategory = ""
 	execution.ErrorMessage = ""
 	job := domain.Job{ID: domain.NewID(), WorkspaceID: execution.WorkspaceID, Kind: "flow.retry", Payload: map[string]any{"execution_id": execution.ID, "connection_id": execution.ConnectionID}}
@@ -1266,6 +1745,9 @@ func (s *Server) repairExecution(w http.ResponseWriter, r *http.Request, session
 	// retain their correlation/idempotency guards; this endpoint never creates a
 	// new FlowVersion or accepts arbitrary provider parameters.
 	execution.Status = domain.ExecutionQueued
+	execution.AttentionStatus = domain.ExecutionAttentionNone
+	execution.AttentionActorAccountID = ""
+	execution.AttentionUpdatedAt = nil
 	execution.ErrorCategory = ""
 	execution.ErrorMessage = ""
 	job := domain.Job{ID: domain.NewID(), WorkspaceID: execution.WorkspaceID, Kind: "flow.repair", Payload: map[string]any{"execution_id": execution.ID, "connection_id": execution.ConnectionID}}
@@ -1344,6 +1826,8 @@ func (s *Server) handleRegistry(w http.ResponseWriter, r *http.Request, session 
 			value, err = s.integration.Registry.ListConnectorBehaviors(r.Context(), workspaceID)
 		case "data-models":
 			value, err = s.integration.Registry.ListDataModels(r.Context(), workspaceID)
+		case "adapter-operations":
+			value = s.integration.Registry.AllowlistedAdapterOperations()
 		default:
 			http.NotFound(w, r)
 			return

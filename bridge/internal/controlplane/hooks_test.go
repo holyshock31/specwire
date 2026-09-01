@@ -42,6 +42,9 @@ func (f *hookGitLabFake) EnsureHook(_ context.Context, _ domain.GitLabInstance, 
 	f.lastSpec = spec
 	return provider.HookResult{ExternalID: "hook-42", Adopted: f.ensureCalls > 1}, nil
 }
+func (f *hookGitLabFake) NoteIssue(context.Context, domain.GitLabInstance, provider.GitLabProject, int, string, *provider.Credential) error {
+	return nil
+}
 func (f *hookGitLabFake) CloseIssue(context.Context, domain.GitLabInstance, provider.GitLabProject, int, *provider.Credential) error {
 	return nil
 }

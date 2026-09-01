@@ -40,8 +40,10 @@ type Store interface {
 	ClaimNextJob(context.Context, string, time.Duration) (domain.Job, error)
 	CompleteJob(context.Context, domain.ID, domain.ID, string) error
 	FailJob(context.Context, domain.ID, domain.ID, string, *time.Time, string) error
-	GetCorrelation(context.Context, domain.ID, domain.ID, string, string) (domain.Correlation, error)
+	GetCorrelation(context.Context, domain.ID, domain.ID, domain.ID, string, string) (domain.Correlation, error)
+	ListCorrelations(context.Context, domain.ID, domain.ID, string, string) ([]domain.Correlation, error)
 	UpsertCorrelation(context.Context, domain.Correlation) (domain.Correlation, error)
+	MarkCorrelationLifecycle(context.Context, domain.ID, domain.ID, domain.ProjectionLifecycleStatus) error
 }
 
 // RetentionStore is optional for runtime implementations. The SQLite store
@@ -185,6 +187,7 @@ func (e *Executor) catalogForWorkspace(ctx context.Context, workspaceID domain.I
 }
 
 type GitLabAdapter interface {
+	NoteIssue(context.Context, domain.GitLabInstance, provider.GitLabProject, int, string, *provider.Credential) error
 	CloseIssue(context.Context, domain.GitLabInstance, provider.GitLabProject, int, *provider.Credential) error
 }
 

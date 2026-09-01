@@ -108,6 +108,13 @@ func TestRequeueFlowExecutionRollsBackAndAllowsOneConcurrentRetry(t *testing.T) 
 	if err := s.CreateFlowExecution(ctx, execution); err != nil {
 		t.Fatal(err)
 	}
+	created, err := s.GetFlowExecution(ctx, workspaceID, execution.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != domain.ExecutionFailed || created.AttentionStatus != domain.ExecutionAttentionOpen {
+		t.Fatalf("new failed execution attention = %+v", created)
+	}
 	conflictingJob := domain.Job{ID: "job-requeue-atomic-conflict", WorkspaceID: workspaceID, Kind: "test", Payload: map[string]any{"reserved": true}}
 	if err := s.EnqueueJob(ctx, conflictingJob); err != nil {
 		t.Fatal(err)
@@ -116,7 +123,7 @@ func TestRequeueFlowExecutionRollsBackAndAllowsOneConcurrentRetry(t *testing.T) 
 	queued.Status = domain.ExecutionQueued
 	queued.ErrorCategory = ""
 	queued.ErrorMessage = ""
-	err := s.RequeueFlowExecution(ctx, queued, domain.Job{ID: conflictingJob.ID, WorkspaceID: workspaceID, Kind: "flow.retry"})
+	err = s.RequeueFlowExecution(ctx, queued, domain.Job{ID: conflictingJob.ID, WorkspaceID: workspaceID, Kind: "flow.retry"})
 	if !errors.Is(err, domain.ErrConflict) {
 		t.Fatalf("atomic requeue error = %v, want conflict", err)
 	}
@@ -124,7 +131,7 @@ func TestRequeueFlowExecutionRollsBackAndAllowsOneConcurrentRetry(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if afterRollback.Status != domain.ExecutionFailed || afterRollback.ErrorCategory != "provider" {
+	if afterRollback.Status != domain.ExecutionFailed || afterRollback.ErrorCategory != "provider" || afterRollback.AttentionStatus != domain.ExecutionAttentionOpen {
 		t.Fatalf("execution after rolled-back requeue = %+v", afterRollback)
 	}
 	claimedConflict, err := s.ClaimNextJob(ctx, "requeue-conflict-worker", time.Minute)
@@ -145,7 +152,7 @@ func TestRequeueFlowExecutionRollsBackAndAllowsOneConcurrentRetry(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.Status != domain.ExecutionQueued || final.ErrorCategory != "" || final.ErrorMessage != "" {
+	if final.Status != domain.ExecutionQueued || final.AttentionStatus != domain.ExecutionAttentionNone || final.AttentionActorAccountID != "" || final.AttentionUpdatedAt != nil || final.ErrorCategory != "" || final.ErrorMessage != "" {
 		t.Fatalf("requeued execution = %+v", final)
 	}
 	claimed, err := s.ClaimNextJob(ctx, "requeue-test-worker", time.Minute)

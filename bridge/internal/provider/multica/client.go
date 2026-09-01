@@ -249,7 +249,11 @@ func (c *Client) EnsureProjectResource(ctx context.Context, instance domain.Mult
 			return provider.ResourceResult{Kind: domain.ResourceProject, ExternalID: firstMapString(item, "id", "uuid", "url"), Adopted: true, Ownership: domain.OwnershipAdopted, RequestID: result.RequestID, Snapshot: map[string]any{"clone_url": cloneURL, "project": project.FullPath}}, nil
 		}
 	}
-	added, err := c.run(ctx, instance, target.WorkspaceID, "project", "resource", "add", target.ExternalID, "--type", "gitlab_repo", "--url", cloneURL, "--label", "GitLab: "+project.FullPath, "--output", "json")
+	// Multica's current resource catalog represents GitLab repositories with
+	// the generic github_repo shortcut. The repository URL remains the
+	// runtime-reachable GitLab clone URL; using the supported shortcut avoids
+	// asking the CLI to interpret an unsupported gitlab_repo shortcut.
+	added, err := c.run(ctx, instance, target.WorkspaceID, "project", "resource", "add", target.ExternalID, "--type", "github_repo", "--url", cloneURL, "--label", "GitLab: "+project.FullPath, "--output", "json")
 	if err != nil {
 		return provider.ResourceResult{}, err
 	}
@@ -257,7 +261,7 @@ func (c *Client) EnsureProjectResource(ctx context.Context, instance domain.Mult
 	if parseErr != nil {
 		item = map[string]any{}
 	}
-	return provider.ResourceResult{Kind: domain.ResourceProject, ExternalID: firstNonEmpty(firstMapString(item, "id", "uuid", "url"), cloneURL), Created: true, Ownership: domain.OwnershipManaged, RequestID: added.RequestID, Snapshot: map[string]any{"clone_url": cloneURL, "project": project.FullPath, "type": "gitlab_repo"}}, nil
+	return provider.ResourceResult{Kind: domain.ResourceProject, ExternalID: firstNonEmpty(firstMapString(item, "id", "uuid", "url"), cloneURL), Created: true, Ownership: domain.OwnershipManaged, RequestID: added.RequestID, Snapshot: map[string]any{"clone_url": cloneURL, "project": project.FullPath, "type": "github_repo"}}, nil
 }
 
 func (c *Client) CreateIssue(ctx context.Context, instance domain.MulticaInstance, input provider.IssueInput, credential *provider.Credential) (provider.IssueResult, error) {
@@ -270,11 +274,21 @@ func (c *Client) CreateIssue(ctx context.Context, instance domain.MulticaInstanc
 	if input.Assignee != "" {
 		args = append(args, "--assignee", input.Assignee)
 	}
-	if input.IdempotencyKey != "" {
-		args = append(args, "--metadata", "specwire_idempotency_key="+input.IdempotencyKey)
-	}
+	// The platform idempotency key is enforced by the persistent FlowExecution
+	// and Correlation records. Multica's issue-create CLI does not expose a
+	// metadata/idempotency flag, so do not invent an unsupported argument here.
 	result, err := c.runWithInput(ctx, instance, "", strings.NewReader(input.Description), args...)
 	if err != nil {
+		// A provider can apply the create and lose the response, or can report
+		// an active duplicate for an earlier applied create. Reconcile only
+		// those result-uncertain categories by searching for the exact project,
+		// title, and description. If no exact match is found, preserve the
+		// original error so a real create failure is not hidden.
+		if shouldReconcileIssueCreate(err) {
+			if adopted, reconcileErr := c.reconcileIssueCreate(ctx, instance, input); reconcileErr == nil {
+				return adopted, nil
+			}
+		}
 		return provider.IssueResult{}, err
 	}
 	item, err := objectValue(result.Stdout, "issue")
@@ -286,6 +300,80 @@ func (c *Client) CreateIssue(ctx context.Context, instance domain.MulticaInstanc
 		return provider.IssueResult{}, c.invalid("create issue", result, errors.New("response did not contain issue ID"))
 	}
 	return provider.IssueResult{IssueID: issueID, ProjectID: firstNonEmpty(firstMapString(item, "project_id"), input.ProjectID), Created: true, RequestID: result.RequestID}, nil
+}
+
+func shouldReconcileIssueCreate(err error) bool {
+	var providerErr *provider.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Provider != domain.ProviderMultica {
+		return false
+	}
+	switch providerErr.Category {
+	case provider.ErrorConflict, provider.ErrorInvalidResponse, provider.ErrorIndeterminate, provider.ErrorTimeout, provider.ErrorTransient:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) reconcileIssueCreate(ctx context.Context, instance domain.MulticaInstance, input provider.IssueInput) (provider.IssueResult, error) {
+	query := strings.TrimSpace(input.Title)
+	if changeID := descriptionField(input.Description, "change_id"); changeID != "" {
+		// The built-in projection description carries change_id as a stable,
+		// searchable identity. It keeps the lookup useful even when a title is
+		// later localized or truncated by the provider UI.
+		query = changeID
+	}
+	result, err := c.run(ctx, instance, "", "issue", "search", query, "--output", "json")
+	if err != nil {
+		return provider.IssueResult{}, err
+	}
+	items, err := objectList(result.Stdout, "issues", "items")
+	if err != nil {
+		return provider.IssueResult{}, c.invalid("reconcile issue create", result, err)
+	}
+	var match map[string]any
+	for _, item := range items {
+		if firstMapString(item, "project_id") != input.ProjectID || firstMapString(item, "title") != input.Title {
+			continue
+		}
+		if strings.TrimSpace(input.Description) != "" && firstMapString(item, "description") != input.Description {
+			continue
+		}
+		if match != nil {
+			return provider.IssueResult{}, &provider.ProviderError{
+				Provider:  domain.ProviderMultica,
+				Operation: "issue search",
+				Category:  provider.ErrorConflict,
+				RequestID: result.RequestID,
+				Err:       fmt.Errorf("multiple exact issue matches for project %s and title %q", input.ProjectID, input.Title),
+			}
+		}
+		match = item
+	}
+	if match == nil {
+		return provider.IssueResult{}, fmt.Errorf("%w: no exact issue match for project %s and title %q", domain.ErrNotFound, input.ProjectID, input.Title)
+	}
+	issueID := firstMapString(match, "id", "uuid", "issue_id")
+	if issueID == "" {
+		return provider.IssueResult{}, c.invalid("reconcile issue create", result, errors.New("matched issue did not contain an issue ID"))
+	}
+	return provider.IssueResult{
+		IssueID:   issueID,
+		ProjectID: firstNonEmpty(firstMapString(match, "project_id"), input.ProjectID),
+		Adopted:   true,
+		RequestID: result.RequestID,
+	}, nil
+}
+
+func descriptionField(description, field string) string {
+	prefix := field + ":"
+	for _, line := range strings.Split(description, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
 }
 
 func (c *Client) SetIssueStatus(ctx context.Context, instance domain.MulticaInstance, issueID, status string, credential *provider.Credential) (provider.IssueStatusResult, error) {

@@ -179,7 +179,8 @@ func liveTestPayload(sample map[string]any, behaviorKey string, connection domai
 	if len(sample) != 0 {
 		return cloneMap(sample), nil
 	}
-	if strings.Contains(strings.ToLower(behaviorKey), "issue") {
+	key := strings.ToLower(behaviorKey)
+	if strings.Contains(key, "issue") {
 		changeID := "LIVE-" + strings.ToUpper(shortIdentity(identity))
 		return map[string]any{
 			"object_kind": "issue",
@@ -193,6 +194,31 @@ func liveTestPayload(sample map[string]any, behaviorKey string, connection domai
 				"id":                  connection.SourceGitLabProject.ExternalID,
 				"path_with_namespace": connection.SourceGitLabProject.FullPath,
 			},
+		}, nil
+	}
+	if strings.Contains(key, "push") || strings.Contains(key, "archive") {
+		changeID := "LIVE-" + strings.ToUpper(shortIdentity(identity))
+		// Keep the default event close to the payload accepted from GitLab and
+		// include the fields normally added by ingress. The archive parser uses
+		// the enriched fields to identify the existing projection and provider
+		// delivery, while the commit trailer makes the sample recognizable as an
+		// archived Push Hook when it is inspected through the execution detail.
+		return map[string]any{
+			"object_kind": "push",
+			"ref":         "refs/heads/main",
+			"after":       shortIdentity(identity),
+			"head_commit": map[string]any{
+				"id":      shortIdentity(identity),
+				"message": "SpecWire-Event: archived\nSpecWire-Change: " + changeID,
+			},
+			"commits": []any{},
+			"project": map[string]any{
+				"id":                  connection.SourceGitLabProject.ExternalID,
+				"path_with_namespace": connection.SourceGitLabProject.FullPath,
+			},
+			"change_id":            changeID,
+			"provider_delivery_id": "live-test:" + string(identity),
+			"lifecycle_event":      "archived",
 		}, nil
 	}
 	return nil, fmt.Errorf("%w: sample_event is required for input behavior %s", domain.ErrInvalid, behaviorKey)

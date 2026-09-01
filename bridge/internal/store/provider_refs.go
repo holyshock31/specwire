@@ -41,6 +41,24 @@ func (s *Store) GetMulticaWorkspace(ctx context.Context, workspaceID, instanceID
 	return item, nil
 }
 
+// GetMulticaWorkspaceByID resolves the internal selection snapshot while
+// keeping both the SpecWire Workspace and Multica instance scope explicit.
+// Connection details use it to render the complete instance → Workspace →
+// project chain without putting provider credentials in the Connection model.
+func (s *Store) GetMulticaWorkspaceByID(ctx context.Context, workspaceID, instanceID, id domain.ID) (domain.MulticaWorkspaceRef, error) {
+	var item domain.MulticaWorkspaceRef
+	err := s.db.QueryRowContext(ctx, `SELECT id, workspace_id, multica_instance_id, external_id, name
+		FROM multica_workspaces WHERE id = ? AND workspace_id = ? AND multica_instance_id = ?`, id, workspaceID, instanceID).
+		Scan(&item.ID, &item.WorkspaceID, &item.InstanceID, &item.ExternalID, &item.Name)
+	if err == sql.ErrNoRows {
+		return domain.MulticaWorkspaceRef{}, fmt.Errorf("%w: Multica workspace %s", domain.ErrNotFound, id)
+	}
+	if err != nil {
+		return domain.MulticaWorkspaceRef{}, fmt.Errorf("get Multica workspace by ID: %w", err)
+	}
+	return item, nil
+}
+
 func (s *Store) ListMulticaWorkspaces(ctx context.Context, workspaceID, instanceID domain.ID) ([]domain.MulticaWorkspaceRef, error) {
 	if err := requireWorkspaceID(workspaceID); err != nil {
 		return nil, err

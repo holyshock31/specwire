@@ -18,7 +18,7 @@
 
 - 不实现任意代码节点、用户上传插件、循环、等待、子流程、错误分支、通知编排或通用 iPaaS 的全部节点目录。
 - 不把 OpenSpec 内容、Git 操作、Agent 执行、MR review/merge 或 Skills 实现移入 SpecWire。
-- 不把 Connection onboarding 的项目创建、Multica 两个资源上下文、标签和 Hook provisioning 变成普通 Flow 节点。
+- 不把 Connection onboarding 的项目创建、Multica 两个资源上下文、两个 GitLab 生命周期标签和 Hook provisioning 变成普通 Flow 节点。
 - 不追求跨 GitLab/Multica 的 exactly-once 或跨 provider 自动事务回滚。
 - 不在本 change 中支持跨 Workspace Flow 导入、运行时 checkout 凭证托管或任意 provider 的自动发现。
 
@@ -47,7 +47,7 @@ Flow runtime
   retry / replay / reconciliation
 ```
 
-`GitLabInstance` 和 `MulticaInstance` 仍然是控制面上的 Workspace-owned endpoint/profile，用于 endpoint、外部 ID 和凭证边界；它们不是 Flow 内的 `ConnectorInstance`。Flow 内只保存 `ConnectorNode`，其内容是选择的 ConnectorBehavior 和参数绑定。GitLab 侧的项目发现和控制面操作使用 Workspace 绑定的 Group credential；MulticaInstance 可以先以 endpoint-only 状态注册，只有声明需要管理能力的操作才需要可选的 Multica control-plane credential。
+`GitLabInstance` 和 `MulticaInstance` 仍然是控制面上的 Workspace-owned endpoint/profile，用于 endpoint、外部 ID 和凭证边界；它们不是 Flow 内的 `ConnectorInstance`。Flow 内只保存 `ConnectorNode`，其内容是选择的 ConnectorBehavior 和参数绑定。GitLabInstance 可以保存一个 Workspace-owned 的实例级 discovery credential，用于在尚未选定 Group 时列出可见 Group；选定 Group 后，若存在 Group credential，则 Group credential 优先用于项目发现和 Connection onboarding。两者都只以 `SecretRef` 进入持久化记录，不能成为 Flow 节点参数中的明文或进程级 fallback。MulticaInstance 可以先以 endpoint-only 状态注册，只有声明需要管理能力的操作才需要可选的 Multica control-plane credential。
 
 `Connection` 是用户可见的源项目到目标项目的绑定，拥有资源 onboarding 结果、共享 Hook 和 Flow 集合。Flow 默认引用 `$connection.source_project`、`$connection.target_project` 以及 Connection 授权范围内的 credential/resource reference；不在每个节点中复制一套项目映射。
 
@@ -119,13 +119,14 @@ MVP 的内置模型和默认绑定先固定为以下契约：
 | Model | Required fields / roles | Default or fixed mapping |
 |---|---|---|
 | `ChangePublication.v1` | `change_id`、`branch`、`branch_head_sha`；语义角色分别为 change identity、source branch、frozen revision | `source_project`、Issue IID/URL、`target_ref`、`status`、`assignee` 为可选上下文；`target_ref` 缺省为 `refs/heads/main`，`status` 缺省为 `backlog`，`assignee` 缺省为空 |
-| `ArchiveCompletion.v1` | `change_id`、source project identity、target ref；另带 provider delivery identity | 只用于查找既有 projection；target ref 默认 `refs/heads/main`，不得创建新 projection |
+| `ArchiveCompletion.v1` | `change_id`、source project identity、target ref；另带 provider delivery identity | 只承载 `main` 上的 `archived` 完成信号，用于查找既有 projection 并转为 `done` |
+| `ChangeLifecycle.v1` | `change_id`、source project identity、target ref、provider delivery identity、lifecycle event/reason | 受控 `specwire::abandoned` 标签新增转换为 `abandoned`；必须携带有限的 reason，用于查找既有 projection 并转为 `cancelled`，不得创建新 projection |
 | `MulticaCreateIssueInput.v1` | target project identity、title、description | target project 默认 `$connection.target_project`；title 默认 `[SpecWire] {change_id}`；status 默认 `backlog`；assignee 可选 |
-| `MulticaCompleteIssueInput.v1` | correlated projection identity / `change_id`、desired status | desired status 固定为 `done`；只能使用已持久化 correlation，不根据 Push payload 猜测无关 issue |
+| `MulticaCompleteIssueInput.v1` | correlated projection lookup selector / `change_id`、desired status | 内置 completion 将 `change_id` 作为稳定查找选择器；运行时只从当前 Connection 下已持久化的各 publication Flow correlation 解析真实目标 ID，不根据 provider payload 猜测无关 issue；`archived` 请求 `done`，`abandoned` 请求 `cancelled`，后者必须带 reason |
 
-Provider event schema 仍归 ConnectorBehavior 管理，不把 GitLab 原始 payload 的全部字段硬编码进 canonical DataModel。内置 GitLab Issue 行为固定匹配 `object_kind=issue`、`action=open` 和 Issue label `change`；内置 GitLab Push 行为固定匹配 `refs/heads/main` 上的 `archived` completion event。
+Provider event schema 仍归 ConnectorBehavior 管理，不把 GitLab 原始 payload 的全部字段硬编码进 canonical DataModel。内置 GitLab Issue publication 行为固定匹配 `object_kind=issue`、`action=open` 和 Issue label `change`；内置 GitLab abandon 行为固定匹配 `Issue Hook` 的 `action=update`，且 `changes.labels.current` 新增精确的 `specwire::abandoned`、`changes.labels.previous` 不含该标签，并要求 Issue 描述可解析出 `change_id`；内置 GitLab Push 行为只匹配 `refs/heads/main` 上的 `archived` completion event。
 
-Connection onboarding 的默认值也在 MVP 中固定：Multica project title 默认取 GitLab full path，description/icon/lead/date 不自动填写；GitLab `change` label 采用 create-or-adopt；Hook 默认同时订阅 Issue 和 Push 所需事件，回调地址取 Workspace/deployment 的 public ingress（本地 Compose 沿用 `http://host.docker.internal:8787/gitlab/specwire`）；资源默认使用 runtime 可达的 SSH clone URL，按配置的 instance host alias 生成，无法使用时才回退 HTTPS；新建或采用的资源标记为 `specwire-managed`，已存在资源保留 adopted ownership。除上述默认外，操作者必须填写 GitLab instance、Group、source project、Multica instance、target workspace，以及选择 target project 或确认创建。
+Connection onboarding 的默认值也在 MVP 中固定：Multica project title 默认取 GitLab full path，description/icon/lead/date 不自动填写；GitLab `change` label 采用 create-or-adopt；Hook 默认同时订阅 Issue 和 Push 所需事件，回调地址取 Workspace/deployment 的 public ingress（本地 Compose 沿用 `http://host.docker.internal:8787/gitlab/specwire`）；资源默认使用 runtime 可达的 SSH clone URL，按配置的 instance host alias 生成，无法使用时才回退 HTTPS；新建或采用的资源标记为 `specwire-managed`，已存在资源保留 adopted ownership。除上述默认外，操作者必须填写 GitLab instance、Group、source project、Multica instance、target workspace，以及选择 target project 或确认创建。向导默认开启“隐藏当前 Workspace 已绑定的项目”筛选；该筛选按实例 ID + provider external ID 在服务端排除活动 Connection 已占用的源/目标项目，停用 Connection 后项目重新可选，取消筛选只用于查看而不绕过保存时的一对一约束。
 
 核心语义角色由平台定义，模型可以携带扩展字段和自定义字段。GenericNode 通过模型和角色元数据工作，不把 provider 字段名散落在代码中。目标 ConnectorBehavior 声明它接受的 input model 和 required roles，发布校验负责发现不兼容连线。
 
@@ -149,7 +150,7 @@ Connection onboarding 的默认值也在 MVP 中固定：Multica project title �
 
 ### 5. Provider access 与产品权限分离
 
-产品权限由 Workspace membership 和 `admin`、scoped `operator`、`viewer` 决定；provider access 则由 endpoint、Group credential、可选 Multica management credential 和 capability probe 决定。选择项目、onboarding、发布 Flow 时，服务端重新检查当前 Workspace 授权范围及所需 provider capability。MVP 不要求把登录账号映射成 GitLab/Multica 的同名成员，也不把 OAuth/OIDC login token 当作 provider credential；如果配置的 Group credential 没有目标 Group/project 权限，操作必须失败并给出可修复诊断。
+产品权限由 Workspace membership 和 `admin`、scoped `operator`、`viewer` 决定；provider access 则由 endpoint 的 discovery credential、选定 Group 的 Group credential、可选 Multica management credential 和 capability probe 决定。首次配置 GitLab 时，管理员可以先把 PAT 或 Group Access Token 绑定到 GitLabInstance，完成 Group discovery；选定 Group 后可以再绑定更窄的 Group credential，项目发现和 onboarding 优先使用它。选择项目、onboarding、发布 Flow 时，服务端重新检查当前 Workspace 授权范围及所需 provider capability。MVP 不要求把登录账号映射成 GitLab/Multica 的同名成员，也不把 OAuth/OIDC login token 当作 provider credential；如果缺少持久化凭据、凭据被 provider 拒绝或没有目标 Group/project 权限，操作必须以可行动的 4xx 诊断失败，不能回退到 `SPECWIRE_GITLAB_TOKEN`。
 
 ### 6. Flow 图、模板和版本
 
@@ -191,6 +192,8 @@ draft → published → paused → archived
 
 草稿保存不产生 provider side effect。发布输入 Flow 时，系统在激活 route 前完成 Hook 创建/领用、签名材料校验和 route reconcile；如果其中一步失败，Flow 保持未发布或进入可恢复错误状态。
 
+废弃协议使用已有 Change Issue 的精确 `specwire::abandoned` 标签作为控制信号，不创建新的生命周期 Issue，也不使用 abandoned Push trailer。Bridge 只接受一次明确的标签新增转换；标签已存在但没有 `changes.labels`，或只是描述、备注、关闭状态更新时，均不得进入 abandon Flow。这样 Bridge 随后写入 `SpecWire-Reason`、记录备注和关闭 Issue 时，不会把自己的后处理重新解释成新的废弃请求。重复投递仍按 at-least-once 处理，并由 action idempotency 与投影终态保护收敛。
+
 ### 8. FlowExecution 与可靠性
 
 Bridge ingress 负责读取原始 body、验签、解析路由所需的最小 provider envelope，并把已接受事件和 FlowVersion 持久化后交给异步 executor。HTTP webhook 响应不等待完整 Multica side effect。
@@ -206,13 +209,44 @@ FlowExecution 至少包含：
 
 执行采用 at-least-once。外部行为必须提供 deterministic idempotency key 或查询/对账能力。已知失败从安全的失败节点恢复；外部调用结果不确定时先进入 `indeterminate`/reconciliation-required，不盲目重试。
 
-同一 Connection/源项目尽量使用有序队列分区，但不能依赖 provider webhook 的全局顺序。归档 Flow 找不到发布投影时应等待、重试或报告可修复关联缺失，而不是完成无关投影。
+同一 Connection/源项目尽量使用有序队列分区，但不能依赖 provider webhook 的全局顺序。归档或废弃 Flow 找不到发布投影时应等待、重试或报告可修复关联缺失，而不是完成/取消无关投影。
 
 条件分支一次只执行一条路径，第一版不做并行 fan-out、事务回滚或自动补偿。已成功的外部动作不会因后续失败被自动删除；部分成功必须在执行详情中可见。
 
 ### 9. Admin UI 与 API 组织
 
-默认管理入口仍以 Connection 列表和资源/健康状态为主。进入某个 Connection 后提供 Flow 列表和 Flow Builder：
+管理入口采用完整的 Workspace 管理信息架构，而不是只保留 Connection 的六个核心视图。原型中的二级页面都是同一控制面上的真实管理入口；它们可以是列表、状态、审计或配置读模型，但不能因为 MVP 以 Connection 为核心就从导航中裁剪掉：
+
+```text
+控制台
+├── 概览
+└── 告警
+集成管理
+├── 连接管理
+├── GitLab 项目
+├── Multica 项目
+├── HOOK 事件
+├── 令牌管理
+├── 集成流（Flow Catalog）
+└── 执行记录
+运营
+├── 运行状态
+├── 同步任务
+└── 审计日志
+配置
+├── 实例配置
+├── 集成能力
+│   ├── 连接器行为（Flow 节点能力）
+│   ├── DataModel（端口数据契约）
+│   └── 提供方类型（高级配置）
+├── 全局配置
+├── 环境变量
+└── 权限管理
+```
+
+其中 Connection 是项目映射、资源、共享 Hook 和多个 Flow 的持续上下文；GitLab/Multica 项目页、Hook 事件、运行状态、同步任务和审计日志从相同的 Workspace-scoped 对象与执行记录生成，不建立另一套项目或连接模型。令牌页只展示 SecretRef 元数据，环境变量页只展示安全策略，权限页只展示当前 Workspace binding 和固定角色。没有后端写能力的配置项也必须明确显示真实的只读状态和边界，不能用空壳按钮伪装成已实现能力。
+
+进入某个 Connection 后提供 Flow 列表和 Flow Builder：
 
 ```text
 Connection detail
@@ -224,6 +258,8 @@ Connection detail
 └── Executions / audit
 ```
 
+Workspace 级“集成流”是 Flow Catalog，只负责按当前 Workspace 汇总和筛选 Flow，并在每行显示所属 Connection、源/目标项目、版本、状态和执行摘要；它不是独立于 Connection 的 Flow 编辑入口。创建和编辑必须从 Connection 详情或 Catalog 行上的所属 Connection 上下文进入 Builder。Builder 不提供 GitLab/Multica 实例、Group、Workspace 或项目的第二套选择器，这些映射以只读范围上下文展示并由 Connection 固定，避免在 Flow 编辑阶段覆盖项目边界。
+
 画布节点的参数表单由 ConnectorBehavior 或 GenericNode 的 parameter schema 驱动。画布显示端口模型、连接校验、必填项、scope 错误和发布阻塞原因；DataModel 默认以端口/边标识展示，并可以展开查看 schema/semantic roles。
 
 API 分成三类：
@@ -234,20 +270,33 @@ API 分成三类：
 
 所有 API 在服务端重新检查 Workspace 和 Group/project scope。凭证只以 alias/reference 出现，Flow 作者不能读取 secret。Flow 版本和执行计划必须在发布/执行之间保持不可变。
 
+### Admin IA implementation note (2026-08-29)
+
+本轮实现将 Connection 作为管理入口和持续上下文：连接工作台左侧保留当前 Workspace 内的 Connection 列表，右侧详情固定显示 GitLab 源端的实例 → Group → 项目和 Multica 目标端的实例 → Workspace → 项目。详情页通过标签页承载 Connection 摘要、Managed Resources/共享 Hook、多个 Flow 和执行记录；Flow Builder 与 Execution Records 都保留 Connection ID，避免把 Flow 或 Execution 误解为全局对象。
+
+完整导航中的二级页面不是被删掉的候选页面：实现以现有控制面 API 和执行记录为数据源，分别提供告警聚合、源/目标项目索引、共享 Hook/事件摘要、SecretRef 元数据、运行健康、同步任务、审计、实例与注册表、Workspace 默认值、运行边界和权限上下文。它们不改变 Connection/Flow 的领域关系，也不把 provider membership、runtime `glab` credential 或 Secret 值暴露给浏览器。原型的完整左侧导航因此是实现范围的一部分；三张正式图片继续作为 Connection 主路径的视觉参考，不能解释为只实现三张图或只保留六个页面。
+
+Flow Builder 使用“模板起步 + 画布编辑”的组合入口。模板只复制为独立草稿；画布左侧提供已注册 ConnectorBehavior 和三个受控 GenericNode，节点以类型化端口和 DataModel 标识连接，右侧 Inspector 编辑参数。节点位置在未保存布局或模板位置冲突时使用确定性二维布局，保证桌面视口中不会因默认 `(0,0)` 而重叠；拖拽新增节点只改变当前草稿，保存/发布仍由既有 Flow API 控制。
+
 ### 10. 迁移和当前行为替换
 
 迁移先把旧 `.env` allowlist/project map、可识别 Hook 和 Multica 资源导入 Default Workspace，建立 endpoint/project/resource/Connection 记录，并采用 managed/adopted 规则防止重复。
 
-随后把现有固定路径表达为两个内置 FlowTemplate：
+随后把现有固定路径表达为三个内置 FlowTemplate，其中 `abandon-change` 是系统保留 Flow：
 
 ```text
 publish-change:
   GitLab Issue Hook → Parse/Normalize → ChangePublication.v1
   → Mapping/Template → Multica Create Issue
 
-complete-archive:
-  GitLab archived Push Hook → Parse/Normalize → ArchiveCompletion.v1
+  complete-archive:
+  GitLab main archived Push Hook → Parse/Normalize → ArchiveCompletion.v1
   → Mapping/Template → Multica Complete Issue
+
+  abandon-change (reserved):
+  GitLab Issue Hook(update + specwire::abandoned label transition)
+  → Parse/Normalize → ChangeLifecycle.v1
+  → Mapping/Template → Multica Complete Issue(cancelled)
 ```
 
 切换期间可以保留有限的兼容读取和单次回滚开关，但不允许新模型和旧 `SPECWIRE_PROJECT_MAP` 同时作为两个活动路由源。成功切换后，旧固定 handler 只保留为迁移参考并移除其直接业务分支。
@@ -300,17 +349,17 @@ bridge/
 - Connection 的一对一约束由数据库唯一约束和服务端冲突诊断共同保证：同一 Workspace 内，一个 GitLab source project 和一个 Multica target project 不能被两个 active Connection 占用；停用/解绑不删除外部对象或历史执行。
 - provider 外部标识、Hook route、managed/adopted resource 和 idempotency key 使用带 instance/Workspace/Connection 的复合唯一约束，避免相同 path 或数值 ID 跨实例碰撞。
 - Flow draft 保存图文档；发布时在事务内记录不可变 FlowVersion、行为/模型版本引用和编译计划摘要，再通过可重试的 route-reconcile 操作激活外部 Hook。外部 provider 调用不假装参与数据库事务，调用结果和 checkpoint 必须单独落盘。
-- Connection onboarding 的每个 provider side effect 都有 operation/checkpoint 记录。项目创建、两个 Multica resource context、label 和 Hook 的步骤可以部分成功；重试先读取 provider 状态并采用或恢复，不靠回滚幻想保持原子性。
+- Connection onboarding 的每个 provider side effect 都有 operation/checkpoint 记录。项目创建、两个 Multica resource context、两个生命周期 label 和 Hook 的步骤可以部分成功；重试先读取 provider 状态并采用或恢复，不靠回滚幻想保持原子性。
 - 入站验签和最小 envelope 解析成功后，在一个事务中写入事件摘要、匹配的 FlowVersion 和可执行 job；HTTP 响应不等待 Multica side effect。原始 payload 和节点快照按 retention 保存并在写入前脱敏。
 
-关键状态机仍以规约为准：Connection 区分 `configured` 与可选 `ready`；Flow 为 `draft → published → paused → archived`；FlowExecution/NodeExecution 使用 `queued`、`running`、成功、`failed`、`skipped`、`indeterminate` 和 `reconciliation-required` 等可观测结果。状态转换集中在 domain/runtime 模块，不散落在 handler 或 UI。
+关键状态机仍以规约为准：Connection 区分 `configured` 与可选 `ready`；Flow 为 `draft → published → paused → archived`；FlowExecution/NodeExecution 使用 `queued`、`running`、成功、`failed`、`skipped`、`indeterminate` 和 `reconciliation-required` 等可观测结果。由 publication Flow 创建的 provider projection 另有 `active → done|cancelled` 生命周期；`archived` 和 `abandoned` 是互斥的终态生命周期信号，前者来自 main Push trailer，后者来自已有 Change Issue 的受控标签新增，状态转换必须持久化且只允许一次，避免重复投递或后处理事件复活投影。FlowExecution 另有独立的人工关注状态：可行动失败默认 `open`，操作员确认后为 `acknowledged`，重试/对账重新排队时清为 `none`；它只影响告警和摘要，不改写执行结果或历史。状态转换集中在 domain/runtime 模块，不散落在 handler 或 UI。
 
 ### 4. Provider adapter 合同与联调前置
 
 Provider adapter 对上层提供少量面向用例的深接口，而不是把每条 CLI/API 命令透传到 UI：
 
-- GitLab adapter：列出 endpoint 下的 Group/project、读取 project identity/clone URL、创建或采用 label、创建/更新/读取 Hook、关闭 Issue，并返回 capability 和 provider request identity。
-- Multica adapter：列出 workspace/project、创建或采用 project、在 workspace repository registry 中添加/读取 repository、在 project resources 中添加/读取 GitLab resource、创建 Issue、更新 Issue status，并返回 capability、资源 ownership 和 provider request identity。
+- GitLab adapter：列出 endpoint 下的 Group/project、读取 project identity/clone URL、创建或采用 label、创建/更新/读取 Hook、记录 Issue note、关闭 Issue，并返回 capability 和 provider request identity。
+- Multica adapter：列出 workspace/project、创建或采用 project、在 workspace repository registry 中添加/读取 repository、在 project resources 中添加/读取 GitLab resource、创建 Issue、更新 Issue status（包括 `cancelled`），并返回 capability、资源 ownership 和 provider request identity。
 - 每个可能产生外部副作用的操作必须返回 confirmed、failed 或 indeterminate 结果，并声明其 idempotency/reconciliation 方法；错误统一映射为 unauthorized、forbidden、not-found、conflict、rate-limited、timeout、invalid-response 或 indeterminate 等类别。
 - runtime 继续使用安全的参数数组调用 `multica` CLI，不允许 shell interpolation；CLI checkout credential 仍只属于 runtime 环境。可选的 Multica control-plane credential 只由声明了对应 capability 的 control-plane adapter 使用。
 
@@ -357,9 +406,22 @@ MVP 的 secret store 使用由部署环境注入的 master key 对 SQLite 中的
 
 1. 更新领域词汇：保留 `GitLabInstance`/`MulticaInstance` 作为控制面 endpoint profile，移除 Flow 内 `ConnectorInstance` 的含义；将用户可见 `IntegrationBinding` 收敛为 `Connection`。
 2. 建立持久化 registry 和 Connection/onboarding 数据模型，导入旧 `.env` 配置，发现并采用现有 Hook/资源。
-3. 建立 ConnectorType/Behavior、DataModel 和 FlowVersion 注册表，先注册 GitLab/Multica 的四个 MVP behaviors 及两个内置模板。
+3. 建立 ConnectorType/Behavior、DataModel 和 FlowVersion 注册表，先注册 GitLab/Multica 的 MVP behaviors 及三个内置模板（其中 `abandon-change` 为系统保留 Flow）。
 4. 增加共享 Hook route、异步 ingress/executor、checkpoint、幂等和 reconciliation，先以 provider fakes 验证。
 5. 实现 Connection detail 内的 Flow Builder、模板创建、模型端口校验、模拟测试、发布和执行详情。
-6. 在兼容窗口内将旧固定 Issue/Push handler 路由到两个内置 Flow；完成真实 GitLab/Multica 端到端验证后关闭旧业务分支。
+6. 在兼容窗口内将旧固定 Issue/Push handler 路由到发布、归档和受控标签废弃三个内置 Flow；完成真实 GitLab/Multica 端到端验证后关闭旧业务分支。
 7. 失败回滚只暂停新路由或重新激活上一个 FlowVersion，不删除已创建的项目、资源、Hook 或历史投影。
 8. 实现验收后 archive 本 change，将接受的行为、领域、架构和体验内容分别合并到 `openspec/specs/behavior/`、`domain/`、`architecture/` 和 `experience/`；在此之前不直接修改主 specs。
+
+### 10. 实例配置与集成能力管理入口
+
+配置页面必须把控制面对象的生命周期表达完整，而不是把写操作藏在两个信息卡片的底部：
+
+- **实例配置**是一个 Workspace-scoped 列表页，合并展示 GitLabInstance 和 MulticaInstance 的内部 ID、Base URL、凭据引用/能力、状态和操作；管理员从“添加实例”弹窗创建 endpoint profile，可以分别测试和停用。停用是保留数据的状态变更，不删除历史 Connection 或资源。
+- GitLab 实例的 discovery credential 仍在实例配置页单独绑定，页面只展示 Alias、类型和能力结果；Secret 不回显，也不进入 Flow。Multica 实例可以先 endpoint-only 登记，是否需要管理凭据由具体 adapter capability 决定，不能把 runtime 的 `glab` checkout credential 当作 SpecWire 实例凭据。
+- **集成能力**不是 Provider 实例或 Connection 台账，而是管理员维护的 Flow 能力注册表。默认主视图是“连接器行为台账”：每一行代表一个可拖入 Flow 的 ConnectorNode 能力，例如 GitLab Push Hook 入口或 Multica Create Issue 出口。页面必须明确显示所属 ConnectorType、方向、输入/输出端口契约、用途、版本和状态，并提供关系详情，说明 `ConnectorType → ConnectorBehavior → Provider event schema / DataModel → allowlisted adapter operation`；不得把 Provider 实例、Connection 或 Flow 混成连接器。
+- 集成能力页面将 ConnectorBehavior、DataModel 和 ConnectorType 分成独立页签。Provider event schema 是连接器行为边界上的原始事件契约，不属于 canonical DataModel 清单；DataModel 清单只展示独立、版本化、可由 Parse/Normalize 或 Mapping/Template 节点选择的数据契约。页面不把 adapter operation 当作可配置脚本，只展示服务端已部署且 allowlisted 的实现元数据。
+- 管理员可以在 DataModel 页签新建模型或从既有模型创建新版本，填写 key、版本、用途说明、JSON schema、required fields、semantic roles 和扩展字段策略；已发布版本不可原地修改，创建的新版本默认保存为草稿。DataModel 的状态变化和注册必须通过 Workspace-scoped 服务端 API 校验并记录审计。
+- ConnectorBehavior 注册支持保存 `draft` 或直接 `published`；已发布行为可以停用/重新启用。新版本从既有行为复制元数据并生成新的可编辑版本号，旧版本记录不原地修改。只有 `published` 行为会进入 Flow Builder palette。
+
+对应的只读 API 为 `GET /api/v1/workspaces/:workspace/registry/adapter-operations`，返回当前进程部署且 allowlisted 的 adapter operation 名称。注册 API 仍在服务端重新执行完整校验，前端列表和表单不是安全边界。实例 CRUD/测试/停用沿用现有 Workspace endpoint API，页面不引入 Flow 内的 ConnectorInstance 概念。

@@ -34,6 +34,34 @@ func TestBuiltinTemplatesCompile(t *testing.T) {
 	}
 }
 
+func TestAbandonTemplateMapsCancellationLifecycle(t *testing.T) {
+	catalog := builtinCatalog(t)
+	template := abandonGraph()
+	result := catalog.Validate(template, true)
+	if !result.Valid {
+		t.Fatalf("abandon template invalid: %+v", result.Diagnostics)
+	}
+
+	mapping, err := simulationMapping(template.Nodes[2], "MulticaCompleteIssueInput.v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := ApplyMapping(map[string]any{
+		"change_id":        "CHG-ABANDON",
+		"lifecycle_event":  "abandoned",
+		"lifecycle_reason": "change has no actual content",
+	}, mapping, RuntimeContext{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output["desired_status"] != "cancelled" || output["lifecycle_event"] != "abandoned" || output["lifecycle_reason"] != "change has no actual content" {
+		t.Fatalf("cancellation mapping output = %#v", output)
+	}
+	if err := ValidateModelValue(catalog, "MulticaCompleteIssueInput.v1", output); err != nil {
+		t.Fatalf("cancellation output rejected: %v", err)
+	}
+}
+
 func TestDraftMayBeIncompleteButPublishDiagnosticsAreSpecific(t *testing.T) {
 	catalog := builtinCatalog(t)
 	empty := catalog.Validate(domain.FlowGraph{}, false)

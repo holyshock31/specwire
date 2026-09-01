@@ -11,6 +11,8 @@ import (
 	"specwire/bridge/internal/provider"
 )
 
+const managedAbandonLabel = "specwire::abandoned"
+
 type ConnectionStore interface {
 	CreateConnection(context.Context, domain.Connection) error
 	GetConnection(context.Context, domain.ID, domain.ID) (domain.Connection, error)
@@ -112,11 +114,11 @@ type OnboardingRequest struct {
 }
 
 type OnboardingResult struct {
-	Operation  domain.OnboardingOperation
-	Connection domain.Connection
-	Resources  []domain.ManagedResource
-	HookPlan   map[string]any
-	Ready      bool
+	Operation  domain.OnboardingOperation `json:"operation"`
+	Connection domain.Connection          `json:"connection"`
+	Resources  []domain.ManagedResource   `json:"resources"`
+	HookPlan   map[string]any             `json:"hook_plan"`
+	Ready      bool                       `json:"ready"`
 }
 
 // ResourceDeprovisionCheck makes the destructive boundary explicit.  The MVP
@@ -302,35 +304,43 @@ func (s *ConnectionService) Onboard(ctx context.Context, request OnboardingReque
 		return fail(err, domain.OnboardingFailed)
 	}
 
-	resources := make([]domain.ManagedResource, 0, 3)
+	resources := make([]domain.ManagedResource, 0, 4)
 	gitlabRef := requestGitLabCredentialRef(request)
 	gitlabCredential, gitlabCleanup, err := s.resolveCredential(ctx, gitlabRef)
 	if err != nil {
 		return fail(err, domain.OnboardingBlocked)
 	}
 	defer gitlabCleanup()
-	var label provider.LabelResult
-	if checkpoint, ok, checkpointErr := s.completedCheckpoint(ctx, request.WorkspaceID, operationID, "gitlab_label"); checkpointErr != nil {
-		return fail(checkpointErr, domain.OnboardingFailed)
-	} else if ok {
-		label = labelFromCheckpoint(checkpoint)
-	} else {
-		label, err = s.gitlab.EnsureLabel(ctx, request.SourceGitLabInstance, sourceProject, "change", gitlabCredential)
-		if err != nil {
-			s.recordProviderEffect(ctx, request, "provider.gitlab.label.ensure", "connection", connection.ID, map[string]any{"provider": "gitlab", "operation": "ensure_label", "outcome": "failed", "error": safeMessage(err)})
+	for _, labelSpec := range []struct {
+		title string
+		step  string
+	}{
+		{title: "change", step: "gitlab_label"},
+		{title: managedAbandonLabel, step: "gitlab_abandoned_label"},
+	} {
+		var label provider.LabelResult
+		if checkpoint, ok, checkpointErr := s.completedCheckpoint(ctx, request.WorkspaceID, operationID, labelSpec.step); checkpointErr != nil {
+			return fail(checkpointErr, domain.OnboardingFailed)
+		} else if ok {
+			label = labelFromCheckpoint(checkpoint)
+		} else {
+			label, err = s.gitlab.EnsureLabel(ctx, request.SourceGitLabInstance, sourceProject, labelSpec.title, gitlabCredential)
+			if err != nil {
+				s.recordProviderEffect(ctx, request, "provider.gitlab.label.ensure", "connection", connection.ID, map[string]any{"provider": "gitlab", "operation": "ensure_label", "title": labelSpec.title, "outcome": "failed", "error": safeMessage(err)})
+				return fail(err, domain.OnboardingFailed)
+			}
+			s.recordProviderEffect(ctx, request, "provider.gitlab.label.ensure", "connection", connection.ID, map[string]any{
+				"provider": "gitlab", "operation": "ensure_label", "title": labelSpec.title, "external_id": label.ExternalID, "request_id": label.RequestID, "created": label.Created, "adopted": label.Adopted,
+			})
+		}
+		labelResource, labelErr := s.store.EnsureManagedResource(ctx, domain.ManagedResource{ID: domain.NewID(), WorkspaceID: request.WorkspaceID, ConnectionID: connection.ID, Kind: domain.ResourceLabel, Provider: domain.ProviderGitLab, InstanceID: request.SourceGitLabInstance.ID, ExternalID: label.ExternalID, Ownership: ownershipFrom(label.Created, label.Adopted), ManagementMark: "specwire-managed", Status: "ready", Snapshot: map[string]any{"title": label.Title, "purpose": labelSpec.step, "request_id": label.RequestID}})
+		if labelErr != nil {
+			return fail(labelErr, domain.OnboardingFailed)
+		}
+		resources = append(resources, labelResource)
+		if err := s.checkpoint(ctx, request.WorkspaceID, operationID, labelSpec.step, "succeeded", label.ExternalID, map[string]any{"external_id": label.ExternalID, "title": label.Title, "purpose": labelSpec.step, "created": label.Created, "adopted": label.Adopted, "request_id": label.RequestID}); err != nil {
 			return fail(err, domain.OnboardingFailed)
 		}
-		s.recordProviderEffect(ctx, request, "provider.gitlab.label.ensure", "connection", connection.ID, map[string]any{
-			"provider": "gitlab", "operation": "ensure_label", "external_id": label.ExternalID, "request_id": label.RequestID, "created": label.Created, "adopted": label.Adopted,
-		})
-	}
-	labelResource, err := s.store.EnsureManagedResource(ctx, domain.ManagedResource{ID: domain.NewID(), WorkspaceID: request.WorkspaceID, ConnectionID: connection.ID, Kind: domain.ResourceLabel, Provider: domain.ProviderGitLab, InstanceID: request.SourceGitLabInstance.ID, ExternalID: label.ExternalID, Ownership: ownershipFrom(label.Created, label.Adopted), ManagementMark: "specwire-managed", Status: "ready", Snapshot: map[string]any{"title": label.Title, "request_id": label.RequestID}})
-	if err != nil {
-		return fail(err, domain.OnboardingFailed)
-	}
-	resources = append(resources, labelResource)
-	if err := s.checkpoint(ctx, request.WorkspaceID, operationID, "gitlab_label", "succeeded", label.ExternalID, map[string]any{"external_id": label.ExternalID, "title": label.Title, "created": label.Created, "adopted": label.Adopted, "request_id": label.RequestID}); err != nil {
-		return fail(err, domain.OnboardingFailed)
 	}
 
 	cloneURL, err := provider.CanonicalCloneURL(sourceProject, request.PreferSSH || !request.PreferHTTPS)

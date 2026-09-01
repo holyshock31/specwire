@@ -2,7 +2,7 @@
 
 ### Requirement: Bridge 校验并过滤 GitLab 事件
 
-Bridge MUST verify the GitLab webhook signature before producing any side effect and MUST resolve the source project through the registered Workspace/endpoint route and the provider's external project ID. It MUST route a valid event only to enabled published input Flows whose ConnectorBehavior, Connection, and event filters match. For the built-in lifecycle templates, an Issue Hook with action `open` and the `change` label is the publication event, while an `archived` Push Hook on the target ref is the completion event. Other hook kinds, refs, actions, labels, deleted branches, malformed payloads, or unmatched routes MUST produce no Flow side effect and MUST remain observable as ignored or skipped.
+Bridge MUST verify the GitLab webhook signature before producing any side effect and MUST resolve the source project through the registered Workspace/endpoint route and the provider's external project ID. It MUST route a valid event only to enabled published input Flows whose ConnectorBehavior, Connection, and event filters match. For the built-in lifecycle templates, an Issue Hook with action `open` and the `change` label is the publication event; an `archived` Push Hook on `main` is the completion event; and an Issue Hook with action `update` that explicitly adds the exact `specwire::abandoned` label is the cancellation event. Other hook kinds, refs, actions, labels, deleted branches, malformed payloads, or unmatched routes MUST produce no Flow side effect and MUST remain observable as ignored or skipped.
 
 #### Scenario: 非法签名请求被拒绝
 
@@ -43,6 +43,11 @@ Bridge MUST verify the GitLab webhook signature before producing any side effect
 
 - **WHEN** a push is not on the configured target ref, deletes the ref, has no `archived` event, or contains an unknown event
 - **THEN** the built-in completion Flow records ignored or skipped and creates or changes no execution projection
+
+#### Scenario: 非法 abandoned Issue 更新不触发副作用
+
+- **WHEN** an Issue update has no explicit `changes.labels` transition adding `specwire::abandoned`, has the label already present, changes only the description, or uses another action
+- **THEN** the built-in abandon Flow records ignored or skipped and creates or changes no execution projection
 
 #### Scenario: 未匹配事件被跳过
 
@@ -166,14 +171,34 @@ For the built-in publication Flow, the Multica output behavior MUST create an Ex
 - **WHEN** the built-in publication Flow creates an execution projection
 - **THEN** the projection contains repository, change ID, source branch, frozen SHA, and target branch metadata needed by the client Agent without reading OpenSpec content through Bridge
 
-### Requirement: 归档事件自动完成投影闭环
+### Requirement: 生命周期终态事件闭环投影
 
-The built-in archive Flow MUST use an `archived` event on the target main ref as a completion signal, not as a publication entry point. It MUST locate the correlated publication and Execution Projection for the source Connection and `change_id`, mark the projection complete, and close linked GitLab publication Issues when the configured GitLab API capability is available. Failure to close an Issue MUST remain recoverable and MUST NOT undo a successful Multica completion. If no correlation exists, the Flow MUST record an actionable diagnostic and perform no unrelated side effect.
+The built-in archive Flow MUST use an `archived` event on `main` as a completion signal, while the reserved abandon Flow MUST use an Issue `update` whose `changes.labels.current` newly contains the exact `specwire::abandoned` label and whose `changes.labels.previous` does not. Neither signal is a publication entry point. Each Flow MUST locate the correlated publication and Execution Projection for the source Connection and `change_id`, then apply the corresponding terminal provider lifecycle: `done` for `archived`, `cancelled` for `abandoned`. The correlation MUST persist that terminal lifecycle so a replay cannot resurrect it. For an abandoned Issue update, the reason MUST be read from the same Issue description's `SpecWire-Reason` field or the bounded default, retained in the execution/audit result, and used for the linked GitLab Issue note. After Multica cancellation is durable, Bridge MUST attempt to close the linked publication Issue. The note/close follow-up MUST NOT modify the control label or otherwise re-enter the abandon transition; if its webhook is delivered, description-only, note, and close updates MUST be ignored by the abandon matcher. Failure to close or note an Issue MUST remain recoverable and MUST NOT undo a successful Multica state transition. If no correlation exists, the Flow MUST record an actionable diagnostic and perform no unrelated side effect.
 
 #### Scenario: 归档完成对应投影
 
 - **WHEN** an `archived` Push Hook reaches the target ref for a published change
 - **THEN** the archive Flow marks the correlated Multica projection done and creates no new projection
+
+#### Scenario: 废弃标签新增取消对应投影
+
+- **WHEN** a valid Issue Hook update for an existing Change Issue has `changes.labels.current` containing `specwire::abandoned`, `changes.labels.previous` without it, and a valid `change_id`
+- **THEN** the reserved abandon Flow marks every active correlated Multica projection `cancelled`, persists the correlation lifecycle as `cancelled`, records the bounded reason, and does not create a new projection or mark it `done`
+
+#### Scenario: 废弃标签更新关闭并记录 GitLab Issue
+
+- **WHEN** an abandoned Change Issue has a linked publication projection and the Connection has the required GitLab API capability
+- **THEN** the Flow records the abandonment reason as a note and attempts to close the same Issue after the Multica cancellation is durable, without changing the abandon label again
+
+#### Scenario: 废弃标签更新缺少关联或格式不匹配
+
+- **WHEN** an Issue update has no valid `change_id`, lacks the explicit label transition, or carries a malformed overlong/multiline `SpecWire-Reason`
+- **THEN** Bridge ignores the event or records a validation result and performs no unrelated Multica or GitLab side effect
+
+#### Scenario: 终态投影不会被重放改变
+
+- **WHEN** the same abandoned label transition is replayed, Bridge's own description/note/close update arrives, or an archived event arrives after the projection is cancelled
+- **THEN** the Flow observes the persisted terminal lifecycle or rejects the non-transition update, performs no second provider transition, note, or Issue close, and never changes `cancelled` back to `done`
 
 #### Scenario: 归档关闭关联 Issue
 
@@ -210,10 +235,20 @@ The built-in archive Flow MUST use an `archived` event on the target main ref as
 - **WHEN** archive completion has no configured GitLab Issue-close capability
 - **THEN** Multica completion still proceeds, the missing closure is observable, and a later repair may close the Issues
 
+#### Scenario: 持久化 provider credential 是唯一请求来源
+
+- **WHEN** persistent-only mode receives a control-plane GitLab request while `SPECWIRE_GITLAB_TOKEN` is absent or present in the process environment
+- **THEN** the adapter uses the selected Workspace/Group `SecretRef` material only; if no persisted credential exists, it returns an actionable 4xx and does not use the process environment token
+
 #### Scenario: 无关联记录的旧 change 归档不报错
 
 - **WHEN** an archived event refers to a historical change with no current correlation
 - **THEN** the completion Flow records an actionable diagnostic, returns without an unrelated side effect, and does not fail the webhook process
+
+#### Scenario: 持久化运行时使用已配置的 Multica profile
+
+- **WHEN** a lifecycle completion event is executed in persistent-only mode
+- **THEN** Bridge invokes the configured Multica adapter with the Connection's Multica instance/profile and does not invoke a developer-machine CLI as a separate control path or use a process-global fallback
 
 ### Requirement: 配置通过环境变量注入，secret 不入仓库
 

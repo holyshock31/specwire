@@ -59,7 +59,10 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 		return nil, err
 	}
 
-	gitlab := gitlabprovider.NewClient(&http.Client{Timeout: cfg.CLITimeout}, cfg.GitLabToken)
+	// Persistent control-plane requests resolve credentials from Workspace-owned
+	// SecretRefs. SPECWIRE_GITLAB_TOKEN is only consumed by the explicit legacy
+	// import below and must never become a request-time fallback.
+	gitlab := gitlabprovider.NewClient(&http.Client{Timeout: cfg.CLITimeout})
 	multica := multicaprovider.NewClient(multicaprovider.Options{Profile: cfg.MulticaProfile, Timeout: cfg.CLITimeout})
 	probe, err := controlplane.NewProviderEndpointProbe(gitlab, multica, vault)
 	if err != nil {
@@ -112,6 +115,7 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
+	credentialService.SetGitLabInstanceProbe(probe)
 	retention := time.Duration(cfg.RetentionDays) * 24 * time.Hour
 	executor, err := runtimenew.NewExecutor(store, gitlab, multica, vault, catalog,
 		runtimenew.WithGitLabCredentialResolver(credentialResolver),
@@ -142,13 +146,50 @@ func newPersistentApplication(cfg *Config) (*persistentApplication, error) {
 	if err != nil {
 		return nil, err
 	}
-	api.SetIntegrationServices(httpapi.IntegrationServices{Store: store, Selection: selection, Connections: connections, Hooks: hooks, Credentials: credentialService, Flows: flows, Registry: registryService, LiveTests: liveTests})
+	seedWorkspace := func(ctx context.Context, workspace domain.Workspace) error {
+		if err := store.BootstrapRegistry(ctx, workspace.ID, bundle); err != nil {
+			return err
+		}
+		return flows.SeedBuiltins(ctx, workspace.ID)
+	}
+	services := httpapi.IntegrationServices{Store: store, Selection: selection, Connections: connections, Hooks: hooks, Credentials: credentialService, Flows: flows, Registry: registryService, LiveTests: liveTests, BootstrapWorkspace: seedWorkspace}
+	api.SetIntegrationServices(services)
+	// A persistent-only install has no Workspace until the first admin
+	// bootstrap. Existing databases still need the same catalog repair on
+	// restart, so seed every known Workspace idempotently here as well.
+	workspaces, err := store.ListWorkspaces(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("list Workspaces for catalog bootstrap: %w", err)
+	}
+	for _, workspace := range workspaces {
+		if err := seedWorkspace(context.Background(), workspace); err != nil {
+			return nil, fmt.Errorf("seed Workspace %s catalog: %w", workspace.ID, err)
+		}
+		connections, listErr := store.ListConnections(context.Background(), workspace.ID)
+		if listErr != nil {
+			return nil, fmt.Errorf("list Workspace %s connections: %w", workspace.ID, listErr)
+		}
+		for _, connection := range connections {
+			if connection.Status == domain.ConnectionDisabled {
+				continue
+			}
+			if _, ensureErr := flows.EnsureAbandonFlow(context.Background(), workspace.ID, connection.ID, ""); ensureErr != nil {
+				// A provider credential or endpoint may be temporarily unavailable
+				// during startup. Keep the reserved Flow in a retryable state and
+				// let the normal reconciliation path repair it without preventing
+				// the control plane from starting.
+				slog.Warn("reserved abandon Flow reconciliation deferred", "workspace_id", workspace.ID, "connection_id", connection.ID, "error", ensureErr)
+			}
+		}
+	}
 
-	// The old .env path is still required during this change's compatibility
-	// window.  Import it once per source project and make the persistent route
-	// model authoritative afterwards.
-	if err := importLegacyConfiguration(context.Background(), cfg, store, vault, gitlab, multica, flows, hooks, bundle); err != nil {
-		return nil, err
+	// Compatibility import is enabled by default for the legacy process-level
+	// mode, but persistent-only installations must opt in explicitly. This
+	// keeps a clean new control plane free of synthetic legacy endpoints.
+	if cfg.LegacyImport {
+		if err := importLegacyConfiguration(context.Background(), cfg, store, vault, gitlab, multica, flows, hooks, bundle); err != nil {
+			return nil, err
+		}
 	}
 	closeOnError = false
 	return &persistentApplication{store: store, api: api, ingress: ingress, worker: worker}, nil
@@ -271,6 +312,20 @@ func ensureLegacyGitLabInstance(ctx context.Context, cfg *Config, store *foundat
 	if err != nil {
 		return nil, err
 	}
+	// An endpoint may have been bootstrapped before the explicit legacy import
+	// runs. In that case the secret was persisted above, but the idempotent
+	// create correctly leaves the existing endpoint untouched. Attach the
+	// imported reference only when the existing endpoint has no credential;
+	// never replace a credential already configured through the control plane.
+	if ref != nil && loaded.CredentialRef == nil {
+		if err := store.UpdateGitLabInstanceCredential(ctx, workspaceID, instance.ID, ref); err != nil {
+			return nil, err
+		}
+		loaded, err = store.GetGitLabInstance(ctx, workspaceID, instance.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return loaded.CredentialRef, nil
 }
 
@@ -345,6 +400,9 @@ func importLegacyProject(ctx context.Context, cfg *Config, store *foundationstor
 		return err
 	}
 	if err := ensureLegacyFlow(ctx, store, flows, workspace.ID, connection.ID, flow.TemplateCompleteArchive, "Complete Archive"); err != nil {
+		return err
+	}
+	if err := ensureLegacyFlow(ctx, store, flows, workspace.ID, connection.ID, flow.TemplateAbandonChange, "Abandon Change"); err != nil {
 		return err
 	}
 	_ = hooks

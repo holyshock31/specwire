@@ -83,9 +83,39 @@ func TestClientUsesSafeCLIContractForOnboardingAndIssueActions(t *testing.T) {
 	if len(runner.inputs) == 0 || runner.inputs[len(runner.inputs)-1] != "body" {
 		t.Fatalf("issue stdin = %q", runner.inputs[len(runner.inputs)-1])
 	}
+	issueCreateCalls := 0
+	for _, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if !strings.Contains(joined, "issue create") {
+			continue
+		}
+		issueCreateCalls++
+		if strings.Contains(joined, "--metadata") || strings.Contains(joined, "execution-1") {
+			t.Fatalf("issue idempotency metadata must not be sent to the supported CLI: %v", call)
+		}
+	}
+	if issueCreateCalls != 1 {
+		t.Fatalf("issue create calls = %d, want 1", issueCreateCalls)
+	}
 	status, err := client.SetIssueStatus(ctx, instance, issue.IssueID, "done", nil)
 	if err != nil || status.Status != "done" {
 		t.Fatalf("status = %+v, %v", status, err)
+	}
+	cancelled, err := client.SetIssueStatus(ctx, instance, issue.IssueID, "cancelled", nil)
+	if err != nil || cancelled.Status != "cancelled" {
+		t.Fatalf("cancelled status = %+v, %v", cancelled, err)
+	}
+	statusCalls := 0
+	for _, call := range runner.calls {
+		if strings.Contains(strings.Join(call, " "), "issue status") {
+			statusCalls++
+			if statusCalls == 2 && !strings.Contains(strings.Join(call, " "), "cancelled") {
+				t.Fatalf("cancelled status argument missing: %v", call)
+			}
+		}
+	}
+	if statusCalls != 2 {
+		t.Fatalf("issue status calls = %d, want 2", statusCalls)
 	}
 	ready, err := client.ProbeReadiness(ctx, instance)
 	if err != nil || !ready.Ready {
@@ -119,6 +149,56 @@ func TestClientAdoptsExistingRepositoryAndProjectResource(t *testing.T) {
 	}
 	if runner.addCalls != 0 {
 		t.Fatalf("existing resources were added %d times", runner.addCalls)
+	}
+}
+
+func TestClientReconcilesIssueCreateAfterProviderDuplicate(t *testing.T) {
+	runner := &duplicateIssueRunner{}
+	client := NewClient(Options{Runner: runner, Timeout: time.Second})
+	instance := domain.MulticaInstance{ID: "multica-1", BaseURL: "http://multica.example.test"}
+	input := provider.IssueInput{
+		ProjectID:   "project-1",
+		Title:       "[SpecWire] CH-1",
+		Description: "SpecWire projection\n\nchange_id: CH-1\nstatus: backlog",
+		Status:      "backlog",
+	}
+
+	result, err := client.CreateIssue(context.Background(), instance, input, nil)
+	if err != nil {
+		t.Fatalf("reconciled issue = %+v, %v", result, err)
+	}
+	if result.IssueID != "issue-existing" || !result.Adopted || result.Created {
+		t.Fatalf("reconciled issue = %+v", result)
+	}
+	if runner.createCalls != 1 || runner.searchCalls != 1 {
+		t.Fatalf("create/search calls = %d/%d, want 1/1", runner.createCalls, runner.searchCalls)
+	}
+	for _, call := range runner.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "--metadata") || strings.Contains(joined, "execution-") {
+			t.Fatalf("unsupported or platform idempotency argument leaked: %v", call)
+		}
+	}
+}
+
+type duplicateIssueRunner struct {
+	calls       [][]string
+	createCalls int
+	searchCalls int
+}
+
+func (r *duplicateIssueRunner) Run(_ context.Context, args []string, _ io.Reader) (CommandResult, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	joined := strings.Join(args, " ")
+	switch {
+	case strings.Contains(joined, "issue create"):
+		r.createCalls++
+		return CommandResult{RequestID: "create-request"}, &CommandError{ExitCode: 1, Stderr: "Active duplicate issue exists: WW1-19 [SpecWire] CH-1 (status: backlog)"}
+	case strings.Contains(joined, "issue search"):
+		r.searchCalls++
+		return CommandResult{RequestID: "search-request", Stdout: []byte(`{"issues":[{"id":"issue-existing","project_id":"project-1","title":"[SpecWire] CH-1","description":"SpecWire projection\n\nchange_id: CH-1\nstatus: backlog"}]}`)}, nil
+	default:
+		return CommandResult{Stdout: []byte(`[]`), RequestID: "request"}, nil
 	}
 }
 

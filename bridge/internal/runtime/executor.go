@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -271,7 +272,7 @@ func (e *Executor) createIssue(ctx context.Context, instance domain.MulticaInsta
 	if changeID == "" {
 		return nil, fmt.Errorf("%w: Multica Create Issue requires change_id", domain.ErrInvalid)
 	}
-	if existing, err := e.store.GetCorrelation(ctx, connection.WorkspaceID, connection.ID, connection.SourceGitLabProject.ExternalID, changeID); err == nil {
+	if existing, err := e.store.GetCorrelation(ctx, connection.WorkspaceID, connection.ID, execution.FlowID, connection.SourceGitLabProject.ExternalID, changeID); err == nil {
 		return map[string]any{
 			"issue_id":            existing.TargetIdentity,
 			"project_id":          projectID,
@@ -298,7 +299,7 @@ func (e *Executor) createIssue(ctx context.Context, instance domain.MulticaInsta
 		return nil, fmt.Errorf("%w: Multica adapter returned no issue ID", domain.ErrInvalid)
 	}
 	issueIID := intValue(input["issue_iid"])
-	change := domain.Correlation{ID: domain.NewID(), WorkspaceID: connection.WorkspaceID, ConnectionID: connection.ID, SourceIdentity: connection.SourceGitLabProject.ExternalID, SourceIssueIID: issueIID, SourceIssueIIDs: []int{issueIID}, PublicationIdentity: changeID, TargetIdentity: result.IssueID, FlowExecutionID: execution.ID, ProviderRequestID: result.RequestID}
+	change := domain.Correlation{ID: domain.NewID(), WorkspaceID: connection.WorkspaceID, ConnectionID: connection.ID, FlowID: execution.FlowID, SourceIdentity: connection.SourceGitLabProject.ExternalID, SourceIssueIID: issueIID, SourceIssueIIDs: []int{issueIID}, PublicationIdentity: changeID, TargetIdentity: result.IssueID, FlowExecutionID: execution.ID, ProviderRequestID: result.RequestID}
 	if _, err := e.store.UpsertCorrelation(ctx, change); err != nil {
 		return nil, err
 	}
@@ -310,30 +311,107 @@ func (e *Executor) completeIssue(ctx context.Context, instance domain.MulticaIns
 	if changeID == "" {
 		return nil, fmt.Errorf("%w: Multica Complete Issue requires change_id", domain.ErrInvalid)
 	}
-	correlation, err := e.store.GetCorrelation(ctx, connection.WorkspaceID, connection.ID, connection.SourceGitLabProject.ExternalID, changeID)
+	correlationKey := firstNonEmpty(stringValue(input["correlation_id"]), changeID)
+	correlations, err := e.store.ListCorrelations(ctx, connection.WorkspaceID, connection.ID, connection.SourceGitLabProject.ExternalID, correlationKey)
 	if err != nil {
-		if errors.Is(err, domain.ErrNotFound) {
-			return nil, &reconciliationError{err: fmt.Errorf("%w: correlated projection for %s is unavailable: %v", domain.ErrNotFound, changeID, err)}
-		}
 		return nil, err
+	}
+	if len(correlations) == 0 {
+		return nil, &reconciliationError{err: fmt.Errorf("%w: correlated projection for %s is unavailable: %v", domain.ErrNotFound, correlationKey, domain.ErrNotFound)}
 	}
 	status := firstNonEmpty(stringValue(input["desired_status"]), "done")
-	if status != "done" {
-		return nil, fmt.Errorf("%w: archive completion status must be done", domain.ErrInvalid)
+	lifecycleEvent := firstNonEmpty(stringValue(input["lifecycle_event"]), stringValue(event.Payload["lifecycle_event"]))
+	lifecycleReason := firstNonEmpty(stringValue(input["lifecycle_reason"]), stringValue(event.Payload["lifecycle_reason"]))
+	if lifecycleEvent == "" {
+		if trailer, ok := lifecycleTrailerForPayload(event.Payload); ok {
+			lifecycleEvent = trailer.Event
+			lifecycleReason = firstNonEmpty(lifecycleReason, trailer.Reason)
+		}
 	}
-	result, err := e.multica.SetIssueStatus(ctx, instance, correlation.TargetIdentity, status, nil)
-	if err != nil {
-		e.recordProviderEffect(ctx, execution, "provider.multica.issue.status", "failed", "", correlation.TargetIdentity, err)
-		return nil, err
+	if lifecycleEvent == "abandoned" {
+		if strings.TrimSpace(lifecycleReason) == "" {
+			return nil, fmt.Errorf("%w: abandoned lifecycle reason is required", domain.ErrInvalid)
+		}
+		status = string(domain.ProjectionCancelled)
 	}
-	e.recordProviderEffect(ctx, execution, "provider.multica.issue.status", "succeeded", result.RequestID, correlation.TargetIdentity, nil)
-	out := map[string]any{"issue_id": correlation.TargetIdentity, "status": result.Status, "provider_request_id": result.RequestID, "correlation_id": execution.CorrelationID}
-	issueIIDs := append([]int(nil), correlation.SourceIssueIIDs...)
-	if len(issueIIDs) == 0 && correlation.SourceIssueIID > 0 {
-		issueIIDs = []int{correlation.SourceIssueIID}
+	if status != string(domain.ProjectionDone) && status != string(domain.ProjectionCancelled) {
+		return nil, fmt.Errorf("%w: unsupported projection lifecycle status %q", domain.ErrInvalid, status)
 	}
+	projectionIDs := make([]string, 0, len(correlations))
+	providerRequestIDs := make([]string, 0, len(correlations))
+	issueIIDsByID := map[int]struct{}{}
+	activeCorrelations := make([]domain.Correlation, 0, len(correlations))
+	terminalStatuses := map[string]struct{}{}
+	for _, correlation := range correlations {
+		projectionIDs = append(projectionIDs, correlation.TargetIdentity)
+		lifecycleStatus := correlation.LifecycleStatus
+		if lifecycleStatus == "" {
+			lifecycleStatus = domain.ProjectionActive
+		}
+		switch lifecycleStatus {
+		case domain.ProjectionActive:
+			activeCorrelations = append(activeCorrelations, correlation)
+		case domain.ProjectionDone, domain.ProjectionCancelled:
+			terminalStatuses[string(lifecycleStatus)] = struct{}{}
+		default:
+			return nil, fmt.Errorf("%w: correlation %s has invalid lifecycle status %q", domain.ErrInvalid, correlation.ID, lifecycleStatus)
+		}
+		for _, issueIID := range correlation.SourceIssueIIDs {
+			if issueIID > 0 {
+				issueIIDsByID[issueIID] = struct{}{}
+			}
+		}
+		if correlation.SourceIssueIID > 0 {
+			issueIIDsByID[correlation.SourceIssueIID] = struct{}{}
+		}
+	}
+	if len(activeCorrelations) == 0 {
+		out := completeIssueOutput(correlations, correlationKey, changeID, status, nil)
+		out["terminal_guard"] = true
+		out["requested_status"] = status
+		if lifecycleEvent != "" {
+			out["lifecycle_event"] = lifecycleEvent
+		}
+		if len(terminalStatuses) == 1 {
+			for terminalStatus := range terminalStatuses {
+				out["status"] = terminalStatus
+			}
+		} else if len(terminalStatuses) > 1 {
+			out["status"] = "mixed"
+		}
+		out["gitlab_issue_note"] = "skipped_terminal"
+		out["gitlab_issue_close"] = "skipped_terminal"
+		return out, nil
+	}
+	for _, correlation := range activeCorrelations {
+		result, err := e.multica.SetIssueStatus(ctx, instance, correlation.TargetIdentity, status, nil)
+		if err != nil {
+			e.recordProviderEffect(ctx, execution, "provider.multica.issue.status", "failed", "", correlation.TargetIdentity, err)
+			return nil, err
+		}
+		e.recordProviderEffect(ctx, execution, "provider.multica.issue.status", "succeeded", result.RequestID, correlation.TargetIdentity, nil)
+		if result.RequestID != "" {
+			providerRequestIDs = append(providerRequestIDs, result.RequestID)
+		}
+		if err := e.store.MarkCorrelationLifecycle(ctx, connection.WorkspaceID, correlation.ID, domain.ProjectionLifecycleStatus(status)); err != nil {
+			return nil, fmt.Errorf("mark correlation %s as %s: %w", correlation.ID, status, err)
+		}
+	}
+	out := completeIssueOutput(correlations, correlationKey, changeID, status, providerRequestIDs)
+	out["processed_projection_count"] = len(activeCorrelations)
+	if lifecycleEvent != "" {
+		out["lifecycle_event"] = lifecycleEvent
+	}
+	issueIIDs := make([]int, 0, len(issueIIDsByID))
+	for issueIID := range issueIIDsByID {
+		issueIIDs = append(issueIIDs, issueIID)
+	}
+	sort.Ints(issueIIDs)
 	if e.credentials == nil || len(issueIIDs) == 0 {
 		out["gitlab_issue_close"] = "skipped"
+		if lifecycleEvent == "abandoned" {
+			out["gitlab_issue_note"] = "skipped"
+		}
 		return out, nil
 	}
 	gitlabInstance, err := e.store.GetGitLabInstance(ctx, connection.WorkspaceID, connection.SourceGitLabProject.InstanceID)
@@ -346,6 +424,18 @@ func (e *Executor) completeIssue(ctx context.Context, instance domain.MulticaIns
 	}
 	defer cleanup()
 	project := provider.GitLabProject{InstanceID: connection.SourceGitLabProject.InstanceID, ExternalID: connection.SourceGitLabProject.ExternalID, FullPath: connection.SourceGitLabProject.FullPath, Name: connection.SourceGitLabProject.Name, WebURL: connection.SourceGitLabProject.WebURL, SSHURL: connection.SourceGitLabProject.SSHURL, HTTPSURL: connection.SourceGitLabProject.HTTPSURL}
+	noteFailed := false
+	if lifecycleEvent == "abandoned" {
+		note := "SpecWire change " + changeID + " 已废弃。原因：" + lifecycleReason
+		for _, issueIID := range issueIIDs {
+			if err := e.gitlab.NoteIssue(ctx, gitlabInstance, project, issueIID, note, credential); err != nil {
+				noteFailed = true
+				e.recordProviderEffect(ctx, execution, "provider.gitlab.issue.note", "failed", "", strconv.Itoa(issueIID), err)
+				continue
+			}
+			e.recordProviderEffect(ctx, execution, "provider.gitlab.issue.note", "succeeded", "", strconv.Itoa(issueIID), nil)
+		}
+	}
 	closed := 0
 	for _, issueIID := range issueIIDs {
 		if err := e.gitlab.CloseIssue(ctx, gitlabInstance, project, issueIID, credential); err != nil {
@@ -355,10 +445,36 @@ func (e *Executor) completeIssue(ctx context.Context, instance domain.MulticaIns
 		e.recordProviderEffect(ctx, execution, "provider.gitlab.issue.close", "succeeded", "", strconv.Itoa(issueIID), nil)
 		closed++
 	}
+	if lifecycleEvent == "abandoned" {
+		if noteFailed {
+			out["gitlab_issue_note"] = "failed"
+		} else {
+			out["gitlab_issue_note"] = "recorded"
+		}
+	}
 	out["gitlab_issue_close"] = "closed"
 	out["gitlab_issues_closed"] = closed
-	_ = event
 	return out, nil
+}
+
+func completeIssueOutput(correlations []domain.Correlation, correlationKey, changeID, status string, providerRequestIDs []string) map[string]any {
+	projectionIDs := make([]string, 0, len(correlations))
+	for _, correlation := range correlations {
+		projectionIDs = append(projectionIDs, correlation.TargetIdentity)
+	}
+	out := map[string]any{
+		"correlation_id":       correlationKey,
+		"change_id":            changeID,
+		"status":               status,
+		"projection_count":     len(correlations),
+		"projection_ids":       projectionIDs,
+		"provider_request_ids": providerRequestIDs,
+		"issue_id":             correlations[0].TargetIdentity,
+	}
+	if len(providerRequestIDs) > 0 {
+		out["provider_request_id"] = providerRequestIDs[0]
+	}
+	return out
 }
 
 type skipError struct{}

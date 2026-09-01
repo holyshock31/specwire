@@ -26,12 +26,22 @@ SpecWire MUST provide a Workspace isolation boundary for accounts, connector con
 
 ### Requirement: Provider endpoint 和 Group credential 可管理
 
-An administrator MUST be able to add, test, disable, and list multiple GitLab and Multica endpoint profiles within a Workspace. A GitLab Group credential MUST support the configured PAT or Group Access Token secret profile, subgroup inheritance, capability checks, safe rotation, and redacted display. A Multica endpoint MAY be registered without a management credential; such a credential is required only for an explicitly declared control-plane capability. Runtime `glab` checkout credentials MUST remain outside SpecWire. The same physical endpoint MAY be registered independently in another Workspace with different credentials and IDs.
+An administrator MUST be able to add, test, disable, and list multiple GitLab and Multica endpoint profiles within a Workspace. A GitLab endpoint MUST support a Workspace-owned PAT or Group Access Token discovery credential so Group selection can work before a Group binding exists. A selected GitLab Group credential MUST support the configured PAT or Group Access Token secret profile, subgroup inheritance, capability checks, safe rotation, and redacted display; when present, it MUST take precedence over the instance discovery credential for that Group's project and onboarding operations. A Multica endpoint MAY be registered without a management credential; such a credential is required only for an explicitly declared control-plane capability. Runtime `glab` checkout credentials MUST remain outside SpecWire. The same physical endpoint MAY be registered independently in another Workspace with different credentials and IDs.
 
 #### Scenario: Workspace 添加多个 GitLab endpoint
 
 - **WHEN** an administrator registers two GitLab endpoint profiles in the same Workspace
 - **THEN** each profile has a distinct internal ID and projects with identical paths remain distinguishable by endpoint and external project ID
+
+#### Scenario: 未选择 Group 前配置 GitLab discovery credential
+
+- **WHEN** an administrator saves a PAT or Group Access Token on a GitLab endpoint before selecting a Group
+- **THEN** SpecWire verifies the credential's `gitlab.groups.read` capability, stores only a redacted `SecretRef`, and the Group selector uses that persisted credential
+
+#### Scenario: 缺少或失效的 provider credential 可行动失败
+
+- **WHEN** Group/project discovery uses an endpoint or Group without a persisted credential, or the provider rejects the configured credential
+- **THEN** the API returns a documented 4xx diagnostic identifying the credential/capability repair path, never a generic `500`, and never uses `SPECWIRE_GITLAB_TOKEN` as request-time fallback
 
 #### Scenario: Group credential 继承子组
 
@@ -72,14 +82,14 @@ The admin surface MUST allow an authorized operator to select a GitLab endpoint,
 - **WHEN** the Workspace role is sufficient but the selected Group credential or optional Multica management capability cannot discover or mutate the selected provider resource
 - **THEN** onboarding is blocked with an actionable capability error and does not claim the Connection as ready
 
-### Requirement: Connection onboarding 幂等配置两个 Multica 资源上下文
+### Requirement: Connection onboarding 幂等配置 Multica 资源上下文和生命周期标签
 
-Onboarding MUST be a durable, retryable operation that can add or adopt the same runtime clone URL in both the selected Multica workspace repository registry and the selected Multica project resources. Existing matching resources MUST be adopted rather than duplicated. The default clone URL MUST be the runtime-reachable SSH URL derived from the registered GitLab endpoint alias, with HTTPS as an explicit fallback. Managed resources MUST carry the `specwire-managed` ownership marker; adopted resources MUST retain adopted ownership. Onboarding MUST distinguish `configured` from optional `ready`, preserve partial progress, and require explicit confirmation for destructive deprovisioning.
+Onboarding MUST be a durable, retryable operation that can add or adopt the same runtime clone URL in both the selected Multica workspace repository registry and the selected Multica project resources, and reconcile the `change` and `specwire::abandoned` GitLab lifecycle labels. Existing matching resources MUST be adopted rather than duplicated. The default clone URL MUST be the runtime-reachable SSH URL derived from the registered GitLab endpoint alias, with HTTPS as an explicit fallback. Managed resources MUST carry the `specwire-managed` ownership marker; adopted resources MUST retain adopted ownership. Onboarding MUST distinguish `configured` from optional `ready`, preserve partial progress, and require explicit confirmation for destructive deprovisioning.
 
-#### Scenario: 两个资源位置都配置
+#### Scenario: 两个资源位置和生命周期标签都配置
 
 - **WHEN** a Connection onboarding operation completes successfully
-- **THEN** the GitLab repository is accepted or adopted in both Multica resource contexts and each result is recorded with ownership and external identifiers
+- **THEN** the GitLab repository is accepted or adopted in both Multica resource contexts, both lifecycle labels are reconciled, and each result is recorded with ownership and external identifiers
 
 #### Scenario: 网络失败后重试不重复创建
 
@@ -121,6 +131,11 @@ The admin surface MUST manage Workspace-scoped Connections rather than a process
 
 - **WHEN** an operator opens a configured Connection
 - **THEN** the page lists its draft, published, paused, and archived Flows and allows the operator to open the Flow Builder within the Connection scope
+
+#### Scenario: Workspace 集成流总览保持 Connection 归属
+
+- **WHEN** an operator opens the Workspace-level 集成流 page or opens a Flow from that list
+- **THEN** the page lists each Flow with its owning Connection and source/target project context, and opening Builder preserves that Connection scope without allowing project or instance remapping
 
 #### Scenario: 禁用 Connection 停止新路由
 
@@ -189,3 +204,41 @@ Workspace, account, provider endpoint, credential reference, Connection, resourc
 
 - **WHEN** a submitted Connection, resource, Flow, or credential reference contains an invalid value or unauthorized resource
 - **THEN** the mutation is rejected with an actionable error and no partial provider side effect is reported as successful
+
+### Requirement: 新建 Connection 必须显式选择端点和项目
+
+The new Connection form MUST start without a preselected GitLab instance, Group, source project, Multica instance, Workspace, or target project. Dependent selectors MUST remain unavailable until their parent selection is explicit, and the form MUST reject preview or save until all required source/target context is selected. A target project MAY remain empty only when the operator explicitly enables automatic target-project creation.
+
+#### Scenario: 新建 Connection 从空表单开始
+
+- **WHEN** an operator opens the new Connection form
+- **THEN** all endpoint and project selectors show a placeholder instead of selecting the first available record, and no Group, project, Workspace, or target-project request is issued before its parent is selected
+
+#### Scenario: 未完成显式选择时不能预览或保存
+
+- **WHEN** an operator clicks preview or save without selecting the required source and target context
+- **THEN** the form reports the missing selections and does not call Connection onboarding
+
+#### Scenario: 显式选择后才加载下级资源
+
+- **WHEN** an operator selects a GitLab instance or Multica instance, then selects each subsequent parent context
+- **THEN** the corresponding Group, source-project, Workspace, and target-project options are loaded one level at a time and remain blank until the operator chooses a value
+
+#### Scenario: 启用隐藏已绑定项目筛选
+
+- **WHEN** an operator enables the new Connection form's `隐藏当前 Workspace 已绑定的项目` option
+- **THEN** GitLab source-project and Multica target-project selectors request and display only projects not used by an active Connection in the current Workspace; disabled Connections release their project identities for selection
+
+### Requirement: 执行告警支持人工确认
+
+The admin surface MUST show the immutable execution outcome separately from its operator attention state. Failed, indeterminate, and reconciliation-required executions MUST be visibly marked as `待关注` or `已知晓`; an authorized operator MUST be able to acknowledge an actionable execution and reopen it later. Acknowledgement MUST NOT rewrite the outcome, hide the execution from history, or claim that provider recovery succeeded. Overview, alert, runtime, and Connection summaries MUST count only open actionable executions as requiring attention, while execution history continues to show acknowledged records with a subdued state and the latest actor/time.
+
+#### Scenario: 告警确认后不再重复提醒
+
+- **WHEN** an operator confirms that a failed execution is known
+- **THEN** the alert navigation/count and attention summaries no longer count it, while the execution history still shows `失败 · 已知晓` and its confirmation metadata
+
+#### Scenario: 执行详情提供恢复关注操作
+
+- **WHEN** an operator opens an acknowledged actionable execution
+- **THEN** the detail view offers `取消已知晓`, which returns it to `待关注` without changing the original execution status

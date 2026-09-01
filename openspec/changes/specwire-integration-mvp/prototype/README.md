@@ -16,14 +16,16 @@
 
 ## 页面范围
 
-- Onboarding 图覆盖 Connection 的首次配置：选择 GitLab/Multica 实例、Group 与项目，选择或创建 Multica project，准备两个资源上下文，并执行预检。它表达 `Connection` 可以先完成配置；Hook 仅显示为计划状态，必须等第一个带 input ConnectorBehavior 的 Flow 发布后才创建或领用并注册 route。
+- 原型的完整左侧信息架构必须保留：控制台（概览、告警）、集成管理（连接管理、GitLab 项目、Multica 项目、HOOK 事件、令牌管理、流程编排、执行记录）、运营（运行状态、同步任务、审计日志）和配置（实例配置、集成能力、全局配置、环境变量、权限管理）。三张正式图片重点覆盖 Connection 主路径，并不意味着其他管理入口可以删掉或只做空壳；其中“集成能力”默认展示连接器行为台账，并分开展示 DataModel 与提供方类型。
+- 二级页面共享同一个 Workspace-scoped read model：项目页索引 Connection 的源/目标项目，Hook 页索引共享 Hook 和事件摘要，运营页索引 FlowExecution/NodeExecution，配置页索引 endpoint、registry、Workspace 策略和访问 binding。Secret、runtime checkout credential 和 provider 登录 token 不进入这些页面。
+- Onboarding 图覆盖 Connection 的首次配置：选择 GitLab/Multica 实例、Group 与项目，选择或创建 Multica project，准备两个 Multica 资源上下文和两个 GitLab 生命周期标签，并执行预检。它表达 `Connection` 可以先完成配置；Hook 仅显示为计划状态，必须等第一个带 input ConnectorBehavior 的 Flow 发布后才创建或领用并注册 route。
 - Connection Detail 图假设 Connection 已完成配置，聚焦 Connection 下的多个 Flow、Flow 摘要、执行记录和执行详情；它不重复展示实例选择、项目发现或资源 onboarding。
 - Builder 图假设用户已进入一个 Connection，聚焦一个 `Publish Change` 草稿的节点编排、参数映射、类型校验和发布；模板选择、空白 Flow 初始态、Connection 资源管理和共享 Hook 管理属于其他页面或前置流程。
 - 实例 ID、外部项目/Workspace ID、资源 ownership、Hook route 和 capability 检查仍以 Change 的 admin/integration-flow 规约为准，不因图片未展示而省略。
 
 ## 术语与状态约定
 
-- Builder 中 GitLab Issue Hook 下的“事件契约”标签表示 `ConnectorBehavior` 的 provider 事件契约，不是 DataModel registry 中的模型。图片中若出现 `GitLabIssueEvent.v1` 这样的版本串，也只表示该 provider contract 的版本；DataModel 以端口/边契约展示，当前内置模型包括 `ChangePublication.v1`、`ArchiveCompletion.v1`、`MulticaCreateIssueInput.v1` 和 `MulticaCompleteIssueInput.v1`。
+- Builder 中 GitLab Issue Hook 下的“事件契约”标签表示 `ConnectorBehavior` 的 provider 事件契约，不是 DataModel registry 中的模型。图片中若出现 `GitLabIssueEvent.v1` 这样的版本串，也只表示该 provider contract 的版本；DataModel 以端口/边契约展示，当前内置模型包括 `ChangePublication.v1`、`ArchiveCompletion.v1`、`ChangeLifecycle.v1`、`MulticaCreateIssueInput.v1` 和 `MulticaCompleteIssueInput.v1`。
 - 执行详情中的重试只对失败或不确定结果、且可以安全继续的执行启用；成功执行不提供可用的重试动作。重放始终需要选择 FlowVersion，并明确确认可能产生的外部副作用。
 - Flow 内没有 `ConnectorInstance`；画布节点表示已注册的 ConnectorBehavior 或受控 GenericNode 加参数绑定，Connection 才拥有项目、资源、共享 Hook 和授权边界。
 
@@ -31,4 +33,4 @@
 
 ## 取舍
 
-本目录只保留每个页面的一张最终参考图。最近生成的其他 onboarding 方向属于候选，不作为 Change 资产入库；旧的连接管理图、拼接截图和被替换的中间版本也不恢复。生成工具缓存中的图片不具有项目文档的权威性。
+本目录只保留 Connection 主路径的三张最终参考图；完整导航中的其他页面由上面的信息架构说明、Change 行为规约和实际页面读模型覆盖，不要求为了凑截图而生成重复图片。最近生成的其他 onboarding 方向属于候选，不作为 Change 资产入库；旧的连接管理图、拼接截图和被替换的中间版本也不恢复。生成工具缓存中的图片不具有项目文档的权威性。

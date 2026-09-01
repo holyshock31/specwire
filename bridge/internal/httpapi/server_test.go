@@ -122,6 +122,41 @@ func TestAuthAndEndpointAPIUsesSessionCSRFAndWorkspaceAuthorization(t *testing.T
 	}
 }
 
+func TestBootstrapSeedsApplicationWorkspaceCatalogThroughHook(t *testing.T) {
+	s, err := store.Open(t.TempDir() + "/bootstrap-hook.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	local, err := auth.NewLocalProvider(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoints, err := controlplane.NewEndpointService(s, testProbe{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := NewServer(local, s, s, endpoints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seeded domain.Workspace
+	api.SetIntegrationServices(IntegrationServices{BootstrapWorkspace: func(_ context.Context, workspace domain.Workspace) error {
+		seeded = workspace
+		return nil
+	}})
+	server := httptest.NewServer(api)
+	defer server.Close()
+
+	status, body := jsonRequest(t, server.Client(), http.MethodPost, server.URL+"/api/v1/auth/bootstrap", `{"email":"admin@example.com","password":"correct horse battery staple","displayName":"Admin"}`, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("bootstrap status = %d body = %s", status, body)
+	}
+	if seeded.ID.Empty() || seeded.Slug != "default" {
+		t.Fatalf("bootstrap hook workspace = %+v", seeded)
+	}
+}
+
 func mustURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	parsed, err := url.Parse(raw)

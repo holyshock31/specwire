@@ -25,6 +25,7 @@ func clearEnv(t *testing.T) {
 		"SPECWIRE_CLI_TIMEOUT",
 		"SPECWIRE_LOG_LEVEL",
 		"SPECWIRE_PERSISTENT_ONLY",
+		"SPECWIRE_LEGACY_IMPORT",
 		"SPECWIRE_RETENTION_DAYS",
 	} {
 		t.Setenv(k, "")
@@ -95,6 +96,34 @@ func TestLoadConfigPersistentOnlyDoesNotRequireLegacyEnvironment(t *testing.T) {
 	}
 	if len(cfg.AllowedProjects) != 0 || len(cfg.WebhookSecrets) != 0 || cfg.MulticaProjectID != "" {
 		t.Fatalf("legacy settings should be optional: %+v", cfg)
+	}
+	if cfg.LegacyImport {
+		t.Fatal("persistent-only must not import legacy configuration by default")
+	}
+}
+
+func TestLoadConfigLegacyImportDefaultsToCompatibilityModeOnly(t *testing.T) {
+	clearEnv(t)
+	setRequired(t)
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.LegacyImport {
+		t.Fatal("legacy mode should keep compatibility import enabled by default")
+	}
+}
+
+func TestLoadConfigPersistentOnlyLegacyImportRequiresOptIn(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("SPECWIRE_PERSISTENT_ONLY", "true")
+	t.Setenv("SPECWIRE_LEGACY_IMPORT", "true")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.LegacyImport {
+		t.Fatal("explicit legacy import opt-in was ignored")
 	}
 }
 

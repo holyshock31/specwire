@@ -19,6 +19,13 @@ type GroupCredentialProbe interface {
 	ProbeGitLabGroup(context.Context, domain.GitLabInstance, domain.GitLabGroupBinding, []byte) ([]domain.CapabilityResult, error)
 }
 
+// GitLabInstanceCredentialProbe verifies the Workspace-level credential used
+// to discover Groups before a Group binding exists. A Group credential can
+// later override this reference for narrower project/onboarding access.
+type GitLabInstanceCredentialProbe interface {
+	ProbeGitLabCredential(context.Context, domain.GitLabInstance, []byte) ([]domain.CapabilityResult, error)
+}
+
 type CredentialStore interface {
 	CreateCredentialProfile(context.Context, domain.CredentialProfile) error
 	GetCredentialProfile(context.Context, domain.ID, domain.ID) (domain.CredentialProfile, error)
@@ -26,20 +33,33 @@ type CredentialStore interface {
 	CreateGitLabGroupBinding(context.Context, domain.GitLabGroupBinding) error
 	GetGitLabGroupBinding(context.Context, domain.ID, domain.ID) (domain.GitLabGroupBinding, error)
 	UpdateGitLabGroupCredential(context.Context, domain.ID, domain.ID, domain.ID, *domain.SecretRef) error
+	UpdateGitLabInstanceCredential(context.Context, domain.ID, domain.ID, *domain.SecretRef) error
 	RecordCapabilityResults(context.Context, domain.ID, domain.ProviderKind, domain.ID, string, string, []domain.CapabilityResult) error
 }
 
 type CredentialService struct {
-	store CredentialStore
-	vault *security.Vault
-	probe GroupCredentialProbe
+	store         CredentialStore
+	vault         *security.Vault
+	probe         GroupCredentialProbe
+	instanceProbe GitLabInstanceCredentialProbe
 }
 
 func NewCredentialService(store CredentialStore, vault *security.Vault, probe GroupCredentialProbe) (*CredentialService, error) {
 	if store == nil || vault == nil || probe == nil {
 		return nil, fmt.Errorf("%w: credential service dependencies are required", domain.ErrInvalid)
 	}
-	return &CredentialService{store: store, vault: vault, probe: probe}, nil
+	service := &CredentialService{store: store, vault: vault, probe: probe}
+	if instanceProbe, ok := probe.(GitLabInstanceCredentialProbe); ok {
+		service.instanceProbe = instanceProbe
+	}
+	return service, nil
+}
+
+// SetGitLabInstanceProbe wires the probe used by the pre-Group discovery
+// credential endpoint. It is separate from the Group probe so unit tests and
+// alternate adapters can implement only the credential scopes they support.
+func (s *CredentialService) SetGitLabInstanceProbe(probe GitLabInstanceCredentialProbe) {
+	s.instanceProbe = probe
 }
 
 type CapabilityError struct {
@@ -62,6 +82,66 @@ func (e *ProviderTransientError) Error() string {
 	return fmt.Sprintf("%v: %v", ErrProviderTransient, e.Err)
 }
 func (e *ProviderTransientError) Unwrap() error { return ErrProviderTransient }
+
+// BindGitLabInstanceCredential stores and verifies the Workspace-level
+// discovery credential, then attaches only its SecretRef to the GitLab
+// instance. The material is never returned or persisted in an API/domain
+// object. This is intentionally distinct from BindGroupCredential: the
+// instance reference is what makes the initial Group selector usable.
+func (s *CredentialService) BindGitLabInstanceCredential(ctx context.Context, instance domain.GitLabInstance, alias string, kind domain.CredentialProfileKind, ref domain.SecretRef, material []byte, requiredCapabilities []string) (domain.SecretRef, []domain.CapabilityResult, error) {
+	if err := validateInstanceCredentialInput(instance, ref, alias, kind); err != nil {
+		return domain.SecretRef{}, nil, err
+	}
+	if s.instanceProbe == nil {
+		return domain.SecretRef{}, nil, fmt.Errorf("%w: GitLab instance credential probe is not configured", domain.ErrInvalid)
+	}
+	if len(material) == 0 {
+		return domain.SecretRef{}, nil, fmt.Errorf("%w: GitLab instance credential material is required", domain.ErrInvalid)
+	}
+	if len(requiredCapabilities) == 0 {
+		requiredCapabilities = []string{"gitlab.groups.read"}
+	}
+	if err := s.vault.Put(ctx, ref, material); err != nil {
+		return domain.SecretRef{}, nil, err
+	}
+	defer clear(material)
+	results, err := s.instanceProbe.ProbeGitLabCredential(ctx, instance, material)
+	if err != nil {
+		return domain.SecretRef{}, nil, fmt.Errorf("probe GitLab instance credential: %w", err)
+	}
+	if err := s.store.RecordCapabilityResults(ctx, instance.WorkspaceID, domain.ProviderGitLab, instance.ID, "gitlab_instance", string(instance.ID), results); err != nil {
+		return domain.SecretRef{}, nil, err
+	}
+	if err := requireCapabilities(results, requiredCapabilities, "configured GitLab instance credential lacks required permissions"); err != nil {
+		return domain.SecretRef{}, nil, err
+	}
+	if err := s.store.UpdateGitLabInstanceCredential(ctx, instance.WorkspaceID, instance.ID, &ref); err != nil {
+		return domain.SecretRef{}, nil, err
+	}
+	return ref, results, nil
+}
+
+func validateInstanceCredentialInput(instance domain.GitLabInstance, ref domain.SecretRef, alias string, kind domain.CredentialProfileKind) error {
+	if instance.WorkspaceID.Empty() || instance.ID.Empty() {
+		return fmt.Errorf("%w: GitLab instance workspace and ID are required", domain.ErrInvalid)
+	}
+	if strings.TrimSpace(alias) == "" {
+		return fmt.Errorf("%w: credential alias is required", domain.ErrInvalid)
+	}
+	if kind != domain.CredentialPAT && kind != domain.CredentialGroupAccessToken {
+		return fmt.Errorf("%w: unsupported GitLab credential kind", domain.ErrInvalid)
+	}
+	if ref.Kind != domain.SecretGroupCredential {
+		return fmt.Errorf("%w: GitLab credential must use group_credential secret kind", domain.ErrInvalid)
+	}
+	if ref.Alias != strings.TrimSpace(alias) {
+		return fmt.Errorf("%w: credential alias and secret reference alias must match", domain.ErrInvalid)
+	}
+	if ref.WorkspaceID != instance.WorkspaceID {
+		return fmt.Errorf("%w: credential belongs to another workspace", domain.ErrForbidden)
+	}
+	return ref.Validate()
+}
 
 func (s *CredentialService) BindGroupCredential(ctx context.Context, instance domain.GitLabInstance, binding domain.GitLabGroupBinding, profileID domain.ID, alias string, kind domain.CredentialProfileKind, ref domain.SecretRef, material []byte, requiredCapabilities []string) (domain.CredentialProfile, error) {
 	if err := validateGroupCredentialInput(binding.WorkspaceID, ref, alias, kind, profileID); err != nil {
@@ -170,6 +250,10 @@ func (s *CredentialService) recordAndRequire(ctx context.Context, binding domain
 	if err := s.store.RecordCapabilityResults(ctx, binding.WorkspaceID, domain.ProviderGitLab, instance.ID, "gitlab_group", binding.ExternalGroupID, results); err != nil {
 		return err
 	}
+	return requireCapabilities(results, required, "configured Group credential lacks required permissions")
+}
+
+func requireCapabilities(results []domain.CapabilityResult, required []string, reason string) error {
 	available := map[string]bool{}
 	for _, result := range results {
 		if result.Available {
@@ -183,7 +267,7 @@ func (s *CredentialService) recordAndRequire(ctx context.Context, binding domain
 		}
 	}
 	if len(missing) != 0 {
-		return &CapabilityError{Missing: missing, Reason: "configured Group credential lacks required permissions"}
+		return &CapabilityError{Missing: missing, Reason: reason}
 	}
 	return nil
 }

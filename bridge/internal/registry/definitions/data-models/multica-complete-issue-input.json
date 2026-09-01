@@ -2,20 +2,24 @@
   "key": "MulticaCompleteIssueInput",
   "version": "v1",
   "display_name": "Multica Complete Issue Input",
-  "description": "Target action input for completing a correlated Multica issue.",
+  "description": "Target lifecycle action input for completing or cancelling a correlated Multica issue.",
   "schema": {
     "type": "object",
     "properties": {
       "correlation_id": {"type": "string"},
       "change_id": {"type": "string"},
-      "desired_status": {"type": "string", "const": "done"}
+      "desired_status": {"type": "string", "enum": ["done", "cancelled"]},
+      "lifecycle_event": {"type": "string", "enum": ["archived", "abandoned"]},
+      "lifecycle_reason": {"type": "string"}
     }
   },
   "required_fields": ["correlation_id", "change_id", "desired_status"],
   "semantic_roles": {
     "correlation_id": "projection_identity",
     "change_id": "change_identity",
-    "desired_status": "completion_status"
+    "desired_status": "completion_status",
+    "lifecycle_event": "lifecycle_event",
+    "lifecycle_reason": "lifecycle_reason"
   },
   "allow_extensions": false,
   "status": "published"

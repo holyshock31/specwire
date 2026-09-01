@@ -15,6 +15,23 @@ import (
 
 const ErrNoJobText = "no runnable job"
 
+func normalizeExecutionAttention(execution *domain.FlowExecution) {
+	if !domain.IsActionableExecutionStatus(execution.Status) {
+		execution.AttentionStatus = domain.ExecutionAttentionNone
+		execution.AttentionActorAccountID = ""
+		execution.AttentionUpdatedAt = nil
+		return
+	}
+	switch execution.AttentionStatus {
+	case domain.ExecutionAttentionOpen, domain.ExecutionAttentionAcknowledged:
+		return
+	default:
+		execution.AttentionStatus = domain.ExecutionAttentionOpen
+		execution.AttentionActorAccountID = ""
+		execution.AttentionUpdatedAt = nil
+	}
+}
+
 // AcceptInboundEvent durably accepts one provider delivery and its Flow
 // execution in one transaction.  The uniqueness of the inbound delivery and
 // execution idempotency key is deliberately enforced by SQLite, so concurrent
@@ -44,6 +61,7 @@ func (s *Store) AcceptInboundEvent(ctx context.Context, event domain.InboundEven
 	if execution.Status == "" {
 		execution.Status = domain.ExecutionQueued
 	}
+	normalizeExecutionAttention(&execution)
 	if job.WorkspaceID.Empty() {
 		job.WorkspaceID = event.WorkspaceID
 	}
@@ -110,9 +128,9 @@ func (s *Store) AcceptInboundEvent(ctx context.Context, event domain.InboundEven
 	}
 	execution.EventID = event.ID
 	result, err := tx.ExecContext(ctx, `INSERT INTO flow_executions
-		(id, workspace_id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(workspace_id, idempotency_key) DO NOTHING`, execution.ID, execution.WorkspaceID, execution.ConnectionID, execution.FlowID, execution.FlowVersionID, execution.FlowVersion, execution.EventID, execution.DeliveryID, execution.IdempotencyKey, execution.CorrelationID, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), execution.CreatedAt.Format(time.RFC3339Nano), execution.UpdatedAt.Format(time.RFC3339Nano))
+		(id, workspace_id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, attention_status, attention_actor_account_id, attention_updated_at, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, idempotency_key) DO NOTHING`, execution.ID, execution.WorkspaceID, execution.ConnectionID, execution.FlowID, execution.FlowVersionID, execution.FlowVersion, execution.EventID, execution.DeliveryID, execution.IdempotencyKey, execution.CorrelationID, execution.Status, execution.AttentionStatus, nullID(execution.AttentionActorAccountID), formatOptionalTime(execution.AttentionUpdatedAt), execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), execution.CreatedAt.Format(time.RFC3339Nano), execution.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return domain.FlowExecution{}, false, constraintError("accept FlowExecution", err)
 	}
@@ -204,6 +222,52 @@ func (s *Store) GetInboundEvent(ctx context.Context, workspaceID, eventID domain
 	return event, nil
 }
 
+// ListInboundEvents returns Workspace-scoped event records in reverse receive
+// order.  Callers that render an operator-facing list should use the metadata
+// fields and avoid displaying Payload unless a separate, explicitly redacted
+// detail view is intended.
+func (s *Store) ListInboundEvents(ctx context.Context, workspaceID, connectionID domain.ID, limit int) ([]domain.InboundEvent, error) {
+	if err := requireWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	query := `SELECT id FROM inbound_events WHERE workspace_id = ?`
+	args := []any{workspaceID}
+	if !connectionID.Empty() {
+		query += ` AND connection_id = ?`
+		args = append(args, connectionID)
+	}
+	query += ` ORDER BY received_at DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list inbound events: %w", err)
+	}
+	defer rows.Close()
+	var ids []domain.ID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, domain.ID(id))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result := make([]domain.InboundEvent, 0, len(ids))
+	for _, id := range ids {
+		item, err := s.GetInboundEvent(ctx, workspaceID, id)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, nil
+}
+
 func (s *Store) GetInboundEventByDelivery(ctx context.Context, workspaceID, sourceInstanceID domain.ID, sourceProject, behaviorKey, behaviorVersion, deliveryID string) (domain.InboundEvent, error) {
 	var eventID string
 	err := s.db.QueryRowContext(ctx, `SELECT id FROM inbound_events WHERE workspace_id = ? AND source_instance_id = ? AND source_project_external_id = ? AND behavior_key = ? AND behavior_version = ? AND delivery_id = ?`, workspaceID, sourceInstanceID, sourceProject, behaviorKey, behaviorVersion, deliveryID).Scan(&eventID)
@@ -279,9 +343,9 @@ func (s *Store) RequeueFlowExecution(ctx context.Context, execution domain.FlowE
 	defer tx.Rollback()
 	now := s.now().UTC()
 	result, err := tx.ExecContext(ctx, `UPDATE flow_executions
-		SET status = ?, current_node_id = ?, provider_request_ids_json = ?, error_category = ?, error_message = ?, updated_at = ?
+		SET status = ?, attention_status = ?, attention_actor_account_id = NULL, attention_updated_at = NULL, current_node_id = ?, provider_request_ids_json = ?, error_category = ?, error_message = ?, updated_at = ?
 		WHERE workspace_id = ? AND id = ? AND status IN (?, ?, ?)`,
-		domain.ExecutionQueued, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), now.Format(time.RFC3339Nano),
+		domain.ExecutionQueued, domain.ExecutionAttentionNone, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), now.Format(time.RFC3339Nano),
 		execution.WorkspaceID, execution.ID, domain.ExecutionFailed, domain.ExecutionIndeterminate, domain.ExecutionReconciliationNeeded)
 	if err != nil {
 		return fmt.Errorf("requeue FlowExecution: %w", err)
@@ -318,6 +382,7 @@ func (s *Store) insertFlowExecutionTx(ctx context.Context, tx *sql.Tx, execution
 	if execution.Status == "" {
 		execution.Status = domain.ExecutionQueued
 	}
+	normalizeExecutionAttention(&execution)
 	if execution.CreatedAt.IsZero() {
 		execution.CreatedAt = s.now()
 	}
@@ -344,17 +409,18 @@ func (s *Store) insertFlowExecutionTx(ctx context.Context, tx *sql.Tx, execution
 		return fmt.Errorf("%w: execution FlowVersion belongs to another workspace", domain.ErrForbidden)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO flow_executions
-		(id, workspace_id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, execution.ID, execution.WorkspaceID, execution.ConnectionID, execution.FlowID, execution.FlowVersionID, execution.FlowVersion, execution.EventID, execution.DeliveryID, execution.IdempotencyKey, execution.CorrelationID, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, execution.ErrorMessage, execution.CreatedAt.Format(time.RFC3339Nano), execution.UpdatedAt.Format(time.RFC3339Nano))
+		(id, workspace_id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, attention_status, attention_actor_account_id, attention_updated_at, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, execution.ID, execution.WorkspaceID, execution.ConnectionID, execution.FlowID, execution.FlowVersionID, execution.FlowVersion, execution.EventID, execution.DeliveryID, execution.IdempotencyKey, execution.CorrelationID, execution.Status, execution.AttentionStatus, nullID(execution.AttentionActorAccountID), formatOptionalTime(execution.AttentionUpdatedAt), execution.CurrentNodeID, providerIDs, execution.ErrorCategory, execution.ErrorMessage, execution.CreatedAt.Format(time.RFC3339Nano), execution.UpdatedAt.Format(time.RFC3339Nano))
 	return constraintError("create FlowExecution", err)
 }
 
 func (s *Store) GetFlowExecution(ctx context.Context, workspaceID, executionID domain.ID) (domain.FlowExecution, error) {
 	var execution domain.FlowExecution
 	var providerIDs, created, updated string
-	err := s.db.QueryRowContext(ctx, `SELECT id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at
+	var attentionActor, attentionUpdated sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT id, connection_id, flow_id, flow_version_id, flow_version, event_id, delivery_id, idempotency_key, correlation_id, status, attention_status, attention_actor_account_id, attention_updated_at, current_node_id, provider_request_ids_json, error_category, error_message, created_at, updated_at
 		FROM flow_executions WHERE workspace_id = ? AND id = ?`, workspaceID, executionID).Scan(
-		&execution.ID, &execution.ConnectionID, &execution.FlowID, &execution.FlowVersionID, &execution.FlowVersion, &execution.EventID, &execution.DeliveryID, &execution.IdempotencyKey, &execution.CorrelationID, &execution.Status, &execution.CurrentNodeID, &providerIDs, &execution.ErrorCategory, &execution.ErrorMessage, &created, &updated)
+		&execution.ID, &execution.ConnectionID, &execution.FlowID, &execution.FlowVersionID, &execution.FlowVersion, &execution.EventID, &execution.DeliveryID, &execution.IdempotencyKey, &execution.CorrelationID, &execution.Status, &execution.AttentionStatus, &attentionActor, &attentionUpdated, &execution.CurrentNodeID, &providerIDs, &execution.ErrorCategory, &execution.ErrorMessage, &created, &updated)
 	if err == sql.ErrNoRows {
 		return domain.FlowExecution{}, fmt.Errorf("%w: FlowExecution %s", domain.ErrNotFound, executionID)
 	}
@@ -362,6 +428,14 @@ func (s *Store) GetFlowExecution(ctx context.Context, workspaceID, executionID d
 		return domain.FlowExecution{}, fmt.Errorf("get FlowExecution: %w", err)
 	}
 	execution.WorkspaceID = workspaceID
+	if attentionActor.Valid {
+		execution.AttentionActorAccountID = domain.ID(attentionActor.String)
+	}
+	execution.AttentionUpdatedAt, err = decodeOptionalTime(attentionUpdated)
+	if err != nil {
+		return domain.FlowExecution{}, err
+	}
+	normalizeExecutionAttention(&execution)
 	if err := json.Unmarshal([]byte(providerIDs), &execution.ProviderRequestIDs); err != nil {
 		return domain.FlowExecution{}, err
 	}
@@ -380,11 +454,12 @@ func (s *Store) UpdateFlowExecution(ctx context.Context, execution domain.FlowEx
 	if err := requireWorkspaceID(execution.WorkspaceID); err != nil {
 		return err
 	}
+	normalizeExecutionAttention(&execution)
 	providerIDs, err := marshalJSON(execution.ProviderRequestIDs, "[]")
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE flow_executions SET status = ?, current_node_id = ?, provider_request_ids_json = ?, error_category = ?, error_message = ?, updated_at = ? WHERE workspace_id = ? AND id = ?`, execution.Status, execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), s.now().Format(time.RFC3339Nano), execution.WorkspaceID, execution.ID)
+	result, err := s.db.ExecContext(ctx, `UPDATE flow_executions SET status = ?, attention_status = ?, attention_actor_account_id = ?, attention_updated_at = ?, current_node_id = ?, provider_request_ids_json = ?, error_category = ?, error_message = ?, updated_at = ? WHERE workspace_id = ? AND id = ?`, execution.Status, execution.AttentionStatus, nullID(execution.AttentionActorAccountID), formatOptionalTime(execution.AttentionUpdatedAt), execution.CurrentNodeID, providerIDs, execution.ErrorCategory, truncateMessage(execution.ErrorMessage), s.now().Format(time.RFC3339Nano), execution.WorkspaceID, execution.ID)
 	if err != nil {
 		return fmt.Errorf("update FlowExecution: %w", err)
 	}
@@ -663,11 +738,17 @@ func (s *Store) UpsertCorrelation(ctx context.Context, correlation domain.Correl
 	if correlation.ID.Empty() {
 		correlation.ID = domain.NewID()
 	}
-	if correlation.WorkspaceID.Empty() || correlation.ConnectionID.Empty() || strings.TrimSpace(correlation.SourceIdentity) == "" || strings.TrimSpace(correlation.PublicationIdentity) == "" {
+	if correlation.WorkspaceID.Empty() || correlation.ConnectionID.Empty() || correlation.FlowID.Empty() || strings.TrimSpace(correlation.SourceIdentity) == "" || strings.TrimSpace(correlation.PublicationIdentity) == "" {
 		return domain.Correlation{}, fmt.Errorf("%w: incomplete correlation", domain.ErrInvalid)
 	}
 	if correlation.CreatedAt.IsZero() {
 		correlation.CreatedAt = s.now()
+	}
+	if correlation.LifecycleStatus == "" {
+		correlation.LifecycleStatus = domain.ProjectionActive
+	}
+	if correlation.LifecycleStatus != domain.ProjectionActive && correlation.LifecycleStatus != domain.ProjectionDone && correlation.LifecycleStatus != domain.ProjectionCancelled {
+		return domain.Correlation{}, fmt.Errorf("%w: invalid correlation lifecycle status %q", domain.ErrInvalid, correlation.LifecycleStatus)
 	}
 	issueIIDs := normalizeIssueIIDs(correlation.SourceIssueIIDs)
 	if len(issueIIDs) == 0 && correlation.SourceIssueIID > 0 {
@@ -681,21 +762,22 @@ func (s *Store) UpsertCorrelation(ctx context.Context, correlation domain.Correl
 		return domain.Correlation{}, fmt.Errorf("marshal correlation source issues: %w", err)
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT INTO correlations
-		(id, workspace_id, connection_id, source_identity, source_issue_iid, source_issue_iids_json, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(workspace_id, connection_id, source_identity, publication_identity) DO UPDATE SET source_issue_iid = excluded.source_issue_iid, source_issue_iids_json = excluded.source_issue_iids_json, target_identity = excluded.target_identity, flow_execution_id = excluded.flow_execution_id, provider_request_id = excluded.provider_request_id`, correlation.ID, correlation.WorkspaceID, correlation.ConnectionID, correlation.SourceIdentity, correlation.SourceIssueIID, string(issueIIDsJSON), correlation.PublicationIdentity, correlation.TargetIdentity, nullID(correlation.FlowExecutionID), correlation.ProviderRequestID, correlation.CreatedAt.Format(time.RFC3339Nano))
+		(id, workspace_id, connection_id, flow_id, source_identity, source_issue_iid, source_issue_iids_json, publication_identity, target_identity, flow_execution_id, provider_request_id, lifecycle_status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(workspace_id, connection_id, flow_id, source_identity, publication_identity) DO UPDATE SET source_issue_iid = excluded.source_issue_iid, source_issue_iids_json = excluded.source_issue_iids_json, target_identity = excluded.target_identity, flow_execution_id = excluded.flow_execution_id, provider_request_id = excluded.provider_request_id`, correlation.ID, correlation.WorkspaceID, correlation.ConnectionID, correlation.FlowID, correlation.SourceIdentity, correlation.SourceIssueIID, string(issueIIDsJSON), correlation.PublicationIdentity, correlation.TargetIdentity, nullID(correlation.FlowExecutionID), correlation.ProviderRequestID, string(correlation.LifecycleStatus), correlation.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return domain.Correlation{}, constraintError("upsert correlation", err)
 	}
-	return s.GetCorrelation(ctx, correlation.WorkspaceID, correlation.ConnectionID, correlation.SourceIdentity, correlation.PublicationIdentity)
+	return s.GetCorrelation(ctx, correlation.WorkspaceID, correlation.ConnectionID, correlation.FlowID, correlation.SourceIdentity, correlation.PublicationIdentity)
 }
 
-func (s *Store) GetCorrelation(ctx context.Context, workspaceID, connectionID domain.ID, sourceIdentity, publicationIdentity string) (domain.Correlation, error) {
+func (s *Store) GetCorrelation(ctx context.Context, workspaceID, connectionID, flowID domain.ID, sourceIdentity, publicationIdentity string) (domain.Correlation, error) {
 	var item domain.Correlation
 	var flowExecution sql.NullString
 	var issueIIDsJSON string
+	var lifecycleStatus string
 	var created string
-	err := s.db.QueryRowContext(ctx, `SELECT id, source_identity, source_issue_iid, source_issue_iids_json, publication_identity, target_identity, flow_execution_id, provider_request_id, created_at FROM correlations WHERE workspace_id = ? AND connection_id = ? AND source_identity = ? AND publication_identity = ?`, workspaceID, connectionID, sourceIdentity, publicationIdentity).Scan(&item.ID, &item.SourceIdentity, &item.SourceIssueIID, &issueIIDsJSON, &item.PublicationIdentity, &item.TargetIdentity, &flowExecution, &item.ProviderRequestID, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT id, flow_id, source_identity, source_issue_iid, source_issue_iids_json, publication_identity, target_identity, flow_execution_id, provider_request_id, lifecycle_status, created_at FROM correlations WHERE workspace_id = ? AND connection_id = ? AND flow_id = ? AND source_identity = ? AND publication_identity = ?`, workspaceID, connectionID, flowID, sourceIdentity, publicationIdentity).Scan(&item.ID, &item.FlowID, &item.SourceIdentity, &item.SourceIssueIID, &issueIIDsJSON, &item.PublicationIdentity, &item.TargetIdentity, &flowExecution, &item.ProviderRequestID, &lifecycleStatus, &created)
 	if err == sql.ErrNoRows {
 		return domain.Correlation{}, fmt.Errorf("%w: correlation %s", domain.ErrNotFound, publicationIdentity)
 	}
@@ -718,8 +800,98 @@ func (s *Store) GetCorrelation(ctx context.Context, workspaceID, connectionID do
 	if flowExecution.Valid {
 		item.FlowExecutionID = domain.ID(flowExecution.String)
 	}
+	item.LifecycleStatus = domain.ProjectionLifecycleStatus(lifecycleStatus)
+	if item.LifecycleStatus == "" {
+		item.LifecycleStatus = domain.ProjectionActive
+	}
 	item.CreatedAt, err = decodeTime(created)
 	return item, err
+}
+
+// ListCorrelations returns every Flow-owned projection for one source change.
+// An archive Flow is a separate Flow from the publication Flow, so it must
+// resolve all matching publication projections instead of querying by its own
+// Flow ID.
+func (s *Store) ListCorrelations(ctx context.Context, workspaceID, connectionID domain.ID, sourceIdentity, publicationIdentity string) ([]domain.Correlation, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, flow_id, source_issue_iid, source_issue_iids_json, publication_identity, target_identity, flow_execution_id, provider_request_id, lifecycle_status, created_at FROM correlations WHERE workspace_id = ? AND connection_id = ? AND flow_id IS NOT NULL AND flow_id != '' AND source_identity = ? AND publication_identity = ? ORDER BY flow_id`, workspaceID, connectionID, sourceIdentity, publicationIdentity)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.Correlation, 0)
+	for rows.Next() {
+		var item domain.Correlation
+		var flowExecution sql.NullString
+		var issueIIDsJSON string
+		var lifecycleStatus string
+		var created string
+		if err := rows.Scan(&item.ID, &item.FlowID, &item.SourceIssueIID, &issueIIDsJSON, &item.PublicationIdentity, &item.TargetIdentity, &flowExecution, &item.ProviderRequestID, &lifecycleStatus, &created); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(issueIIDsJSON) != "" {
+			if err := json.Unmarshal([]byte(issueIIDsJSON), &item.SourceIssueIIDs); err != nil {
+				return nil, fmt.Errorf("decode correlation source issues: %w", err)
+			}
+		}
+		item.SourceIssueIIDs = normalizeIssueIIDs(item.SourceIssueIIDs)
+		if len(item.SourceIssueIIDs) == 0 && item.SourceIssueIID > 0 {
+			item.SourceIssueIIDs = []int{item.SourceIssueIID}
+		}
+		if item.SourceIssueIID == 0 && len(item.SourceIssueIIDs) > 0 {
+			item.SourceIssueIID = item.SourceIssueIIDs[0]
+		}
+		item.WorkspaceID, item.ConnectionID = workspaceID, connectionID
+		if flowExecution.Valid {
+			item.FlowExecutionID = domain.ID(flowExecution.String)
+		}
+		item.LifecycleStatus = domain.ProjectionLifecycleStatus(lifecycleStatus)
+		if item.LifecycleStatus == "" {
+			item.LifecycleStatus = domain.ProjectionActive
+		}
+		item.CreatedAt, err = decodeTime(created)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// MarkCorrelationLifecycle advances a projection exactly once from active to
+// a terminal provider lifecycle. Repeated delivery of the same terminal
+// event is idempotent; a conflicting terminal event is rejected so an older
+// archive event cannot resurrect a cancelled projection (or vice versa).
+func (s *Store) MarkCorrelationLifecycle(ctx context.Context, workspaceID, correlationID domain.ID, status domain.ProjectionLifecycleStatus) error {
+	if workspaceID.Empty() || correlationID.Empty() {
+		return fmt.Errorf("%w: correlation workspace and id are required", domain.ErrInvalid)
+	}
+	if status != domain.ProjectionDone && status != domain.ProjectionCancelled {
+		return fmt.Errorf("%w: terminal correlation lifecycle status %q is not supported", domain.ErrInvalid, status)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE correlations SET lifecycle_status = ? WHERE workspace_id = ? AND id = ? AND (lifecycle_status = '' OR lifecycle_status = 'active')`, string(status), workspaceID, correlationID)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected > 0 {
+		return nil
+	}
+	var current string
+	err = s.db.QueryRowContext(ctx, `SELECT lifecycle_status FROM correlations WHERE workspace_id = ? AND id = ?`, workspaceID, correlationID).Scan(&current)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("%w: correlation %s", domain.ErrNotFound, correlationID)
+	}
+	if err != nil {
+		return err
+	}
+	if current == string(status) {
+		return nil
+	}
+	return fmt.Errorf("%w: correlation %s is already %s", domain.ErrConflict, correlationID, current)
 }
 
 func normalizeIssueIIDs(values []int) []int {

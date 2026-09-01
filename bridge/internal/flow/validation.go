@@ -118,8 +118,20 @@ func ValidateModelValue(c Catalog, model string, value map[string]any) error {
 		if constant, ok := property["const"]; ok && !modelValuesEqual(actual, constant) {
 			return fmt.Errorf("%w: model %s field %s has an invalid constant", domain.ErrInvalid, model, field)
 		}
+		if allowed, ok := property["enum"].([]any); ok && !containsModelValue(allowed, actual) {
+			return fmt.Errorf("%w: model %s field %s has an unsupported value", domain.ErrInvalid, model, field)
+		}
 	}
 	return nil
+}
+
+func containsModelValue(values []any, actual any) bool {
+	for _, value := range values {
+		if modelValuesEqual(actual, value) {
+			return true
+		}
+	}
+	return false
 }
 
 func propertyType(value any) string {

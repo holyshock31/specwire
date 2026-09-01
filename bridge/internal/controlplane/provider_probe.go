@@ -36,6 +36,20 @@ func (p *ProviderEndpointProbe) ProbeGitLab(ctx context.Context, instance domain
 	return []domain.CapabilityResult{{Capability: "gitlab.groups.read", Available: true}}, nil
 }
 
+// ProbeGitLabCredential is used while configuring the instance-level
+// discovery credential, before the instance has a persisted SecretRef. The
+// caller owns the material and CredentialService clears it after the probe.
+func (p *ProviderEndpointProbe) ProbeGitLabCredential(ctx context.Context, instance domain.GitLabInstance, material []byte) ([]domain.CapabilityResult, error) {
+	if len(material) == 0 {
+		return nil, fmt.Errorf("%w: GitLab credential material is required", domain.ErrInvalid)
+	}
+	credential := &provider.Credential{Ref: domain.SecretRef{ID: domain.ID("credential-probe"), WorkspaceID: instance.WorkspaceID, Alias: "credential-probe", Kind: domain.SecretGroupCredential}, Material: material}
+	if _, err := p.gitlab.ListGroups(ctx, instance, "", credential); err != nil {
+		return nil, err
+	}
+	return []domain.CapabilityResult{{Capability: "gitlab.groups.read", Available: true}}, nil
+}
+
 // ProbeGitLabGroup verifies the capabilities that can be observed without a
 // write-side permission probe.  GitLab does not expose a portable endpoint
 // for testing webhook-write permission, so that capability remains

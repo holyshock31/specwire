@@ -89,6 +89,37 @@ func (s *Store) GetWorkspaceBySlug(ctx context.Context, slug string) (domain.Wor
 	return workspace, err
 }
 
+// ListWorkspaces is used by application startup to idempotently seed the
+// declarative registry and built-in Flow templates for already-created
+// Workspaces. Authorization-facing callers should use
+// ListWorkspacesForAccount instead.
+func (s *Store) ListWorkspaces(ctx context.Context) ([]domain.Workspace, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, slug, name, status, created_at, updated_at
+		FROM workspaces ORDER BY name, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list Workspaces: %w", err)
+	}
+	defer rows.Close()
+	var result []domain.Workspace
+	for rows.Next() {
+		var item domain.Workspace
+		var created, updated string
+		if err := rows.Scan(&item.ID, &item.Slug, &item.Name, &item.Status, &created, &updated); err != nil {
+			return nil, fmt.Errorf("scan Workspace: %w", err)
+		}
+		item.CreatedAt, err = decodeTime(created)
+		if err != nil {
+			return nil, fmt.Errorf("decode Workspace created_at: %w", err)
+		}
+		item.UpdatedAt, err = decodeTime(updated)
+		if err != nil {
+			return nil, fmt.Errorf("decode Workspace updated_at: %w", err)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
 // ListWorkspacesForAccount exposes only active memberships.  The account is
 // intentionally the first authorization edge so a caller cannot enumerate
 // another account's Workspace IDs.

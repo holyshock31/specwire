@@ -26,6 +26,7 @@ import (
 type runtimeGitLabFake struct {
 	hookID   string
 	ensure   int
+	noted    []string
 	closed   []int
 	closeErr error
 }
@@ -65,6 +66,10 @@ func (f *runtimeGitLabFake) EnsureHook(context.Context, domain.GitLabInstance, p
 		return provider.HookResult{ExternalID: f.hookID, Created: true}, nil
 	}
 	return provider.HookResult{ExternalID: f.hookID, Adopted: true}, nil
+}
+func (f *runtimeGitLabFake) NoteIssue(_ context.Context, _ domain.GitLabInstance, _ provider.GitLabProject, iid int, body string, _ *provider.Credential) error {
+	f.noted = append(f.noted, strconv.Itoa(iid)+":"+body)
+	return nil
 }
 func (f *runtimeGitLabFake) CloseIssue(_ context.Context, _ domain.GitLabInstance, _ provider.GitLabProject, iid int, _ *provider.Credential) error {
 	f.closed = append(f.closed, iid)
@@ -243,7 +248,7 @@ func TestIngressAcceptsAndDeduplicatesPublication(t *testing.T) {
 	if !foundProviderCreate {
 		t.Fatalf("provider side effect audit missing: %+v", audits)
 	}
-	correlation, err := db.GetCorrelation(ctx, workspaceID, "connection-runtime", "101", "CHG-7")
+	correlation, err := db.GetCorrelation(ctx, workspaceID, "connection-runtime", item.ID, "101", "CHG-7")
 	if err != nil || correlation.TargetIdentity != "issue-runtime" || correlation.SourceIssueIID != 7 {
 		t.Fatalf("correlation=%+v err=%v", correlation, err)
 	}
@@ -307,6 +312,57 @@ func TestLiveTestRequiresConfirmationAndQueuesRedactedExecution(t *testing.T) {
 	}
 	if jobs.Payload["execution_id"] != string(execution.ID) {
 		t.Fatalf("live test job payload = %+v", jobs.Payload)
+	}
+}
+
+func TestLiveTestCompleteArchiveUsesPushHookDefaultSample(t *testing.T) {
+	db, catalog, _, _, _, workspaceID := openRuntime(t)
+	ctx := context.Background()
+	service, err := flow.NewService(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SeedBuiltins(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	item, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplateCompleteArchive, "1.0.0", "Complete archive live test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, item.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	liveTests, err := NewLiveTestService(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := liveTests.Start(ctx, workspaceID, item.ID, LiveTestRequest{ConfirmSideEffects: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.Status != domain.ExecutionQueued || !strings.HasPrefix(execution.DeliveryID, "live-test:") {
+		t.Fatalf("complete archive live test execution = %+v", execution)
+	}
+	event, err := db.GetInboundEvent(ctx, workspaceID, execution.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Payload["object_kind"] != "push" || event.Payload["ref"] != "refs/heads/main" {
+		t.Fatalf("default push sample = %+v", event.Payload)
+	}
+	if strings.TrimSpace(stringValue(event.Payload["after"])) == "" {
+		t.Fatalf("default push sample has no commit SHA: %+v", event.Payload)
+	}
+	changeID := stringValue(event.Payload["change_id"])
+	if !strings.HasPrefix(changeID, "LIVE-") {
+		t.Fatalf("default push sample change_id = %q", changeID)
+	}
+	headCommit, ok := event.Payload["head_commit"].(map[string]any)
+	if !ok || !strings.Contains(stringValue(headCommit["message"]), "SpecWire-Event: archived") || !strings.Contains(stringValue(headCommit["message"]), "SpecWire-Change: "+changeID) {
+		t.Fatalf("default push sample archive trailer = %+v", event.Payload["head_commit"])
+	}
+	if stringValue(event.Payload["provider_delivery_id"]) != "live-test:"+string(execution.ID) {
+		t.Fatalf("default push sample provider delivery = %q", event.Payload["provider_delivery_id"])
 	}
 }
 
@@ -399,6 +455,122 @@ func TestIngressAndExecutorCompleteArchiveCorrelation(t *testing.T) {
 	}
 }
 
+func TestIngressAndExecutorAbandonCancelsProjection(t *testing.T) {
+	db, catalog, vault, gitlab, multica, workspaceID := openRuntime(t)
+	ctx := context.Background()
+	reconciler, err := controlplane.NewHookReconciler(db, gitlab, vault, catalog, "https://specwire.example/gitlab/specwire?instance_id=gitlab-runtime")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := flow.NewService(db, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.SetRouteActivator(reconciler)
+	if err := service.SeedBuiltins(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	publication, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplatePublishChange, "1.0.0", "Publish abandoned change")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, publication.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	abandonFlow, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplateAbandonChange, "1.0.0", "Cancel abandoned projection")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, abandonFlow.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	archiveFlow, err := service.CreateFromTemplate(ctx, workspaceID, "connection-runtime", "", flow.TemplateCompleteArchive, "1.0.0", "Complete archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := service.Publish(ctx, workspaceID, archiveFlow.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	hook, err := db.GetHookByProject(ctx, workspaceID, "gitlab-runtime", "101")
+	if err != nil || hook.SigningRef == nil {
+		t.Fatalf("hook = %+v, err=%v", hook, err)
+	}
+	secret, err := vault.Resolve(ctx, *hook.SigningRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress, err := NewIngress(db, vault, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(id string, event string, body []byte) *httptest.ResponseRecorder {
+		ts := strconv.FormatInt(time.Now().Unix(), 10)
+		r := httptest.NewRequest(http.MethodPost, "/gitlab/specwire?instance_id=gitlab-runtime", strings.NewReader(string(body)))
+		r.Header.Set("X-Gitlab-Event", event)
+		r.Header.Set("webhook-id", id)
+		r.Header.Set("webhook-timestamp", ts)
+		r.Header.Set("webhook-signature", sign(secret, id, ts, body))
+		response := httptest.NewRecorder()
+		ingress.ServeHTTP(response, r)
+		return response
+	}
+	publicationBody := []byte(`{"object_kind":"issue","object_attributes":{"iid":21,"action":"open","description":"change_id: CHG-ABANDON\nbranch: change/feat-CHG-ABANDON\nbranch_head_sha: abandon-sha\n","labels":[{"title":"change"}]},"project":{"id":101,"path_with_namespace":"platform/service"}}`)
+	if response := post("delivery-pub-abandon", "Issue Hook", publicationBody); response.Code != http.StatusAccepted {
+		t.Fatalf("publication status=%d body=%s", response.Code, response.Body.String())
+	}
+	publicationExecutions, err := db.ListFlowExecutions(ctx, workspaceID, "connection-runtime", publication.ID, 10)
+	if err != nil || len(publicationExecutions) != 1 {
+		t.Fatalf("publication executions=%d err=%v", len(publicationExecutions), err)
+	}
+	executor, err := NewExecutor(db, gitlab, multica, vault, catalog, WithGitLabCredentialResolver(runtimeGitLabCredentials{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.Execute(ctx, workspaceID, publicationExecutions[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	abandonBody := []byte(`{"object_kind":"issue","object_attributes":{"iid":21,"action":"update","description":"change_id: CHG-ABANDON\nbranch: change/feat-CHG-ABANDON\nbranch_head_sha: abandon-sha\nSpecWire-Reason: change has no actual content\n","labels":[{"title":"change"},{"title":"specwire::abandoned"}]},"changes":{"labels":{"previous":[{"title":"change"}],"current":[{"title":"change"},{"title":"specwire::abandoned"}]}},"project":{"id":101,"path_with_namespace":"platform/service"}}`)
+	if response := post("delivery-abandon", "Issue Hook", abandonBody); response.Code != http.StatusAccepted {
+		t.Fatalf("abandon status=%d body=%s", response.Code, response.Body.String())
+	}
+	abandonExecutions, err := db.ListFlowExecutions(ctx, workspaceID, "connection-runtime", abandonFlow.ID, 10)
+	if err != nil || len(abandonExecutions) != 1 {
+		t.Fatalf("abandon executions=%d err=%v", len(abandonExecutions), err)
+	}
+	if err := executor.Execute(ctx, workspaceID, abandonExecutions[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(multica.statuses) != 1 || multica.statuses[0] != "issue-runtime:cancelled" {
+		t.Fatalf("statuses after abandon=%v", multica.statuses)
+	}
+	if len(gitlab.noted) != 1 || !strings.Contains(gitlab.noted[0], "change has no actual content") {
+		t.Fatalf("abandon notes=%v", gitlab.noted)
+	}
+	if len(gitlab.closed) != 1 || gitlab.closed[0] != 21 {
+		t.Fatalf("closed issues after abandon=%v", gitlab.closed)
+	}
+	correlations, err := db.ListCorrelations(ctx, workspaceID, "connection-runtime", "101", "CHG-ABANDON")
+	if err != nil || len(correlations) != 1 || correlations[0].LifecycleStatus != domain.ProjectionCancelled {
+		t.Fatalf("cancelled correlations=%+v err=%v", correlations, err)
+	}
+
+	archiveBody := []byte(`{"ref":"refs/heads/main","after":"archive-after-abandon","head_commit":{"id":"archive-after-abandon","message":"archive\n\nSpecWire-Event: archived\nSpecWire-Change: CHG-ABANDON"},"commits":[],"project":{"id":101,"path_with_namespace":"platform/service"}}`)
+	if response := post("delivery-archive-after-abandon", "Push Hook", archiveBody); response.Code != http.StatusAccepted {
+		t.Fatalf("late archive status=%d body=%s", response.Code, response.Body.String())
+	}
+	lateExecutions, err := db.ListFlowExecutions(ctx, workspaceID, "connection-runtime", archiveFlow.ID, 10)
+	if err != nil || len(lateExecutions) != 1 {
+		t.Fatalf("late archive executions=%d err=%v", len(lateExecutions), err)
+	}
+	if err := executor.Execute(ctx, workspaceID, lateExecutions[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(multica.statuses) != 1 || len(gitlab.noted) != 1 || len(gitlab.closed) != 1 {
+		t.Fatalf("terminal guard repeated provider effects: statuses=%v notes=%v closed=%v", multica.statuses, gitlab.noted, gitlab.closed)
+	}
+}
+
 func TestIngressDeliversOneDeliveryToEveryMatchingPublishedFlow(t *testing.T) {
 	db, catalog, vault, gitlab, multica, workspaceID := openRuntime(t)
 	ctx := context.Background()
@@ -481,8 +653,16 @@ func TestIngressDeliversOneDeliveryToEveryMatchingPublishedFlow(t *testing.T) {
 	if err := executor.Execute(ctx, workspaceID, secondExecutions[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if len(multica.created) != 1 {
-		t.Fatalf("same source identity should produce one projection, got %d", len(multica.created))
+	if len(multica.created) != 2 {
+		t.Fatalf("matching Flows must produce independent projections, got %d", len(multica.created))
+	}
+	firstCorrelation, err := db.GetCorrelation(ctx, workspaceID, "connection-runtime", first.ID, "101", "CHG-17")
+	if err != nil || firstCorrelation.FlowID != first.ID {
+		t.Fatalf("first Flow correlation=%+v err=%v", firstCorrelation, err)
+	}
+	secondCorrelation, err := db.GetCorrelation(ctx, workspaceID, "connection-runtime", second.ID, "101", "CHG-17")
+	if err != nil || secondCorrelation.FlowID != second.ID {
+		t.Fatalf("second Flow correlation=%+v err=%v", secondCorrelation, err)
 	}
 }
 

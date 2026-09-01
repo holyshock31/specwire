@@ -170,6 +170,7 @@ type GitLab interface {
 	GetProject(context.Context, domain.GitLabInstance, string, *Credential) (GitLabProject, error)
 	EnsureLabel(context.Context, domain.GitLabInstance, GitLabProject, string, *Credential) (LabelResult, error)
 	EnsureHook(context.Context, domain.GitLabInstance, GitLabProject, HookSpec, *Credential) (HookResult, error)
+	NoteIssue(context.Context, domain.GitLabInstance, GitLabProject, int, string, *Credential) error
 	CloseIssue(context.Context, domain.GitLabInstance, GitLabProject, int, *Credential) error
 }
 

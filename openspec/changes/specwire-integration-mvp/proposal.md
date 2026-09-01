@@ -12,9 +12,9 @@ SpecWire 当前把 GitLab 项目映射、Webhook 生命周期、凭证和 Multic
 - 新增声明式、版本化的 DataModel registry。系统提供内置模型，管理员可增加模型版本；模型定义不散落在执行代码中。
 - 新增可拖拽的 Flow Builder、FlowTemplate、FlowVersion 和 FlowExecution。草稿与发布分离，发布版本不可变，执行记录固定使用启动时版本。
 - 第一版提供解析/标准化、映射/模板、条件/过滤三个通用中间节点；只允许一个输入连接器、无环 DAG 和互斥条件分支，不支持自定义代码、循环、等待、子流程、错误分支或通知节点。
-- 将当前固定的 GitLab → Multica 行为迁移为内置模板：`Issue Hook → ChangePublication.v1 → Multica Create Issue`，以及 `archived Push Hook → ArchiveCompletion.v1 → Multica Complete Issue`。
+- 将当前固定的 GitLab → Multica 行为迁移为内置模板：`Issue Hook → ChangePublication.v1 → Multica Create Issue`、`main archived Push Hook → ArchiveCompletion.v1 → Multica Complete Issue(done)`，以及受控的 `Issue Hook update + specwire::abandoned 标签新增 → ChangeLifecycle.v1 → Multica Complete Issue(cancelled)`；废弃不再使用 change 分支 Push trailer。
 - 将 Bridge 改为共享 Hook 接收、按已发布 Flow 路由并异步执行；保留 at-least-once、幂等、关联、检查点、重试、重放、部分成功和不确定外部结果的恢复语义。
-- 发布 Flow 时自动校验并 reconcile 已配置的 Hook；Connection onboarding 负责项目、Multica workspace/project 及两个 GitLab 资源上下文，不把资源创建做成画布节点。
+- 发布 Flow 时自动校验并 reconcile 已配置的 Hook；Connection onboarding 负责项目、Multica workspace/project、两个 GitLab 生命周期标签及其资源记录，不把资源创建做成画布节点。
 - 提供模板创建、空白 Flow、样例事件模拟、一次性真实连接测试、执行历史和失败重试；敏感数据只保存有期限的脱敏快照。
 - 旧的 `workspace-instance-onboarding` 规划被本 change supersede；主 `openspec/specs/` 下的 `behavior/`、`domain/`、`architecture/` 和 `experience/` 只在实现、验收和归档后合并，不在设计阶段直接改写。
 
@@ -27,8 +27,8 @@ SpecWire 当前把 GitLab 项目映射、Webhook 生命周期、凭证和 Multic
 ### Modified Capabilities
 
 - `admin`: 将固定项目配置与 `.env` 持久化升级为 Workspace-scoped Connection、资源 onboarding、Flow 管理、模板、发布和执行观测。
-- `bridge`: 从固定 GitLab 事件处理改为共享 Hook、Flow 路由和异步执行，同时保留 Issue 发布与 archived Push 完成投影的内置模板语义。
-- `workflow`: 保持 GitLab 仍是发布变更的事实源、Multica 是执行投影，Skills/Agent 仍在边界外；将“只处理固定两条事件路径”改为由已发布 Integration Flow 承载，第一版模板保持现有生命周期闭环。
+- `bridge`: 从固定 GitLab 事件处理改为共享 Hook、Flow 路由和异步执行，同时保留 Issue 发布、archived Push 完成和受控 abandoned Issue 标签取消投影的内置模板语义。
+- `workflow`: 保持 GitLab 仍是发布变更的事实源、Multica 是执行投影，Skills/Agent 仍在边界外；将“只处理固定事件路径”改为由已发布 Integration Flow 承载，第一版模板保持现有生命周期闭环。
 
 ## Impact
 

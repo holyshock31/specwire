@@ -2,7 +2,9 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -10,6 +12,23 @@ import (
 	"specwire/bridge/internal/provider"
 	"specwire/bridge/internal/store"
 )
+
+func TestOnboardingResultUsesStableJSONFieldNames(t *testing.T) {
+	value, err := json.Marshal(OnboardingResult{Operation: domain.OnboardingOperation{ID: "operation-json"}, Connection: domain.Connection{ID: "connection-json"}, Resources: []domain.ManagedResource{}, HookPlan: map[string]any{}, Ready: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{`"operation"`, `"connection"`, `"resources"`, `"hook_plan"`, `"ready"`} {
+		if !strings.Contains(string(value), key) {
+			t.Fatalf("JSON result missing %s: %s", key, value)
+		}
+	}
+	for _, key := range []string{`"Operation"`, `"Connection"`, `"Resources"`, `"HookPlan"`, `"Ready"`} {
+		if strings.Contains(string(value), key) {
+			t.Fatalf("JSON result contains unstable field %s: %s", key, value)
+		}
+	}
+}
 
 type onboardingGitLabFake struct {
 	project provider.GitLabProject
@@ -27,10 +46,18 @@ func (f *onboardingGitLabFake) GetProject(context.Context, domain.GitLabInstance
 }
 func (f *onboardingGitLabFake) EnsureLabel(context.Context, domain.GitLabInstance, provider.GitLabProject, string, *provider.Credential) (provider.LabelResult, error) {
 	f.labels++
-	return provider.LabelResult{ExternalID: "label-change", Title: "change", Created: f.labels == 1, Adopted: f.labels > 1}, nil
+	return provider.LabelResult{ExternalID: "label-" + strconv.Itoa(f.labels), Title: func() string {
+		if f.labels%2 == 0 {
+			return managedAbandonLabel
+		}
+		return "change"
+	}(), Created: true}, nil
 }
 func (f *onboardingGitLabFake) EnsureHook(context.Context, domain.GitLabInstance, provider.GitLabProject, provider.HookSpec, *provider.Credential) (provider.HookResult, error) {
 	return provider.HookResult{ExternalID: "hook-1", Created: true}, nil
+}
+func (f *onboardingGitLabFake) NoteIssue(context.Context, domain.GitLabInstance, provider.GitLabProject, int, string, *provider.Credential) error {
+	return nil
 }
 func (f *onboardingGitLabFake) CloseIssue(context.Context, domain.GitLabInstance, provider.GitLabProject, int, *provider.Credential) error {
 	return nil
@@ -127,8 +154,8 @@ func TestConnectionOnboardingCreatesProjectAndBothResourceContexts(t *testing.T)
 	if result.Connection.TargetMulticaProject.Name != "platform/webdeck" {
 		t.Fatalf("default target title = %q", result.Connection.TargetMulticaProject.Name)
 	}
-	if len(result.Resources) != 3 {
-		t.Fatalf("resources = %d, want label + two resource contexts", len(result.Resources))
+	if len(result.Resources) != 4 {
+		t.Fatalf("resources = %d, want two labels + two resource contexts", len(result.Resources))
 	}
 	if multica.created != 1 || multica.workspaceResources != 1 || multica.projectResources != 1 {
 		t.Fatalf("provider calls: project=%d workspace=%d project-resource=%d", multica.created, multica.workspaceResources, multica.projectResources)
@@ -147,7 +174,7 @@ func TestConnectionOnboardingCreatesProjectAndBothResourceContexts(t *testing.T)
 		t.Fatalf("persisted operation = %+v", operation)
 	}
 	resources, err := s.ListManagedResources(ctx, "workspace-onboarding", result.Connection.ID)
-	if err != nil || len(resources) != 3 {
+	if err != nil || len(resources) != 4 {
 		t.Fatalf("persisted resources = %d, %v", len(resources), err)
 	}
 	audits, err := s.ListAuditEvents(ctx, "workspace-onboarding", "", "", 50)
@@ -169,14 +196,14 @@ func TestConnectionOnboardingCreatesProjectAndBothResourceContexts(t *testing.T)
 	if err != nil {
 		t.Fatalf("retry Onboard: %v", err)
 	}
-	if second.Connection.ID != result.Connection.ID || multica.created != 1 || len(second.Resources) != 3 {
+	if second.Connection.ID != result.Connection.ID || multica.created != 1 || len(second.Resources) != 4 {
 		t.Fatalf("retry duplicated onboarding: connection=%s project_creates=%d resources=%d", second.Connection.ID, multica.created, len(second.Resources))
 	}
 	plan, err := service.DeprovisionCheck(ctx, "workspace-onboarding", result.Connection.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.ExternalDeletionPlanned || !plan.HistoryRetained || len(plan.Checks) != 3 {
+	if plan.ExternalDeletionPlanned || !plan.HistoryRetained || len(plan.Checks) != 4 {
 		t.Fatalf("deprovision plan = %+v", plan)
 	}
 	for _, check := range plan.Checks {
@@ -269,8 +296,8 @@ func TestConnectionOnboardingResumesAfterPartialResourceFailure(t *testing.T) {
 		t.Fatalf("partial operation = %+v", operation)
 	}
 	partial, err := s.ListManagedResources(ctx, workspaceID, operation.ConnectionID)
-	if err != nil || len(partial) != 2 {
-		t.Fatalf("partial resources = %d, %v; want label and workspace repository", len(partial), err)
+	if err != nil || len(partial) != 3 {
+		t.Fatalf("partial resources = %d, %v; want two labels and workspace repository", len(partial), err)
 	}
 
 	result, err := service.Onboard(ctx, request)
@@ -284,7 +311,7 @@ func TestConnectionOnboardingResumesAfterPartialResourceFailure(t *testing.T) {
 		t.Fatalf("resume repeated provider effects: projects=%d workspace_resources=%d project_resources=%d", multica.created, multica.workspaceResources, multica.projectResources)
 	}
 	resources, err := s.ListManagedResources(ctx, workspaceID, result.Connection.ID)
-	if err != nil || len(resources) != 3 {
-		t.Fatalf("resumed resources = %d, %v; want label and two resource contexts", len(resources), err)
+	if err != nil || len(resources) != 4 {
+		t.Fatalf("resumed resources = %d, %v; want two labels and two resource contexts", len(resources), err)
 	}
 }

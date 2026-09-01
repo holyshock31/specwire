@@ -30,7 +30,7 @@ type MappingRule struct {
 type MappingSpec map[string]MappingRule
 
 // DefaultMappingForModel is the small, declarative-by-contract mapping set
-// used by the two built-in templates.  Custom Mapping/Template nodes can
+// used by the built-in templates.  Custom Mapping/Template nodes can
 // provide their own MappingSpec in the graph; these defaults keep the bundled
 // templates useful without embedding a provider call or executable script in
 // the canvas.
@@ -51,9 +51,14 @@ func DefaultMappingForModel(model string) (MappingSpec, bool) {
 		}, true
 	case "MulticaCompleteIssueInput.v1", "MulticaCompleteIssueInput@v1":
 		return MappingSpec{
-			"correlation_id": {Source: "$runtime.flow_execution_id"},
+			// The archive event does not carry a target provider ID.  Keep the
+			// stable change identity as the lookup selector; the output adapter
+			// resolves the actual target from persisted correlations.
+			"correlation_id": {Source: "$input.change_id"},
 			"change_id":      {Source: "$input.change_id"},
 			"desired_status": {Constant: "done"},
+			"lifecycle_event": {Source: "$input.lifecycle_event"},
+			"lifecycle_reason": {Source: "$input.lifecycle_reason"},
 		}, true
 	default:
 		return nil, false
@@ -84,6 +89,8 @@ func parseNormalize(providerEvent map[string]any, model string, context RuntimeC
 		output = parsePublication(providerEvent, context)
 	case "ArchiveCompletion.v1", "ArchiveCompletion@v1":
 		output = parseArchiveCompletion(providerEvent, context)
+	case "ChangeLifecycle.v1", "ChangeLifecycle@v1":
+		output = parseChangeLifecycle(providerEvent, context)
 	default:
 		definition, ok := catalog.Model(model)
 		if !ok {
@@ -139,6 +146,40 @@ func parseArchiveCompletion(event map[string]any, context RuntimeContext) map[st
 	output["source_project"] = firstValue(context.SourceProject, stringValue(object(event["project"])["path_with_namespace"]), stringValue(event["source_project"]))
 	output["target_ref"] = firstValue(stringValue(event["ref"]), context.TargetRef, "refs/heads/main")
 	output["provider_delivery_id"] = firstValue(stringValue(event["provider_delivery_id"]), stringValue(event["delivery_id"]))
+	if lifecycleEvent := stringValue(event["lifecycle_event"]); lifecycleEvent != "" {
+		output["lifecycle_event"] = lifecycleEvent
+	}
+	if lifecycleReason := stringValue(event["lifecycle_reason"]); lifecycleReason != "" {
+		output["lifecycle_reason"] = lifecycleReason
+	}
+	return output
+}
+
+func parseChangeLifecycle(event map[string]any, context RuntimeContext) map[string]any {
+	attributes := object(event["object_attributes"])
+	description := stringValue(attributes["description"])
+	fields := parseDescriptionFields(description)
+	output := map[string]any{}
+	output["change_id"] = firstValue(fields["change_id"], stringValue(event["change_id"]))
+	output["source_project"] = firstValue(context.SourceProject, stringValue(object(event["project"])["path_with_namespace"]), stringValue(event["source_project"]))
+	output["target_ref"] = firstValue(stringValue(event["target_ref"]), context.TargetRef, "refs/heads/main")
+	output["provider_delivery_id"] = firstValue(stringValue(event["provider_delivery_id"]), stringValue(event["delivery_id"]))
+	output["lifecycle_event"] = firstValue(stringValue(event["lifecycle_event"]), "abandoned")
+	output["lifecycle_reason"] = firstValue(
+		stringValue(event["lifecycle_reason"]),
+		fields["specwire_reason"],
+		fields["specwire-reason"],
+		fields["abandon_reason"],
+		fields["abandon-reason"],
+		fields["reason"],
+		"GitLab Issue 添加 specwire::abandoned 标签",
+	)
+	if iid := intValue(attributes["iid"]); iid != 0 {
+		output["issue_iid"] = iid
+	}
+	if url := firstValue(stringValue(attributes["url"]), stringValue(attributes["web_url"]), stringValue(event["issue_url"])); url != "" {
+		output["issue_url"] = url
+	}
 	return output
 }
 
@@ -159,7 +200,8 @@ func parseDescriptionFields(description string) map[string]string {
 		key = strings.ToLower(strings.TrimSpace(key))
 		value = strings.TrimSpace(value)
 		switch key {
-		case "change_id", "branch", "branch_head_sha", "target_ref", "status", "assignee":
+		case "change_id", "branch", "branch_head_sha", "target_ref", "status", "assignee",
+			"lifecycle_reason", "specwire_reason", "specwire-reason", "abandon_reason", "abandon-reason", "reason":
 			result[key] = value
 		}
 	}
@@ -167,7 +209,14 @@ func parseDescriptionFields(description string) map[string]string {
 }
 
 func validateRequiredModel(value map[string]any, model string) error {
-	required := map[string][]string{"ChangePublication.v1": {"change_id", "branch", "branch_head_sha"}, "ChangePublication@v1": {"change_id", "branch", "branch_head_sha"}, "ArchiveCompletion.v1": {"change_id", "source_project", "target_ref", "provider_delivery_id"}, "ArchiveCompletion@v1": {"change_id", "source_project", "target_ref", "provider_delivery_id"}}[model]
+	required := map[string][]string{
+		"ChangePublication.v1": {"change_id", "branch", "branch_head_sha"},
+		"ChangePublication@v1": {"change_id", "branch", "branch_head_sha"},
+		"ArchiveCompletion.v1": {"change_id", "source_project", "target_ref", "provider_delivery_id"},
+		"ArchiveCompletion@v1": {"change_id", "source_project", "target_ref", "provider_delivery_id"},
+		"ChangeLifecycle.v1":   {"change_id", "source_project", "target_ref", "provider_delivery_id", "lifecycle_event", "lifecycle_reason"},
+		"ChangeLifecycle@v1":   {"change_id", "source_project", "target_ref", "provider_delivery_id", "lifecycle_event", "lifecycle_reason"},
+	}[model]
 	for _, field := range required {
 		if strings.TrimSpace(stringValue(value[field])) == "" {
 			return fmt.Errorf("%w: model %s requires %s", domain.ErrInvalid, model, field)

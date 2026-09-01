@@ -25,11 +25,12 @@ type Config struct {
 	RefFilter        string            // SPECWIRE_REF_FILTER：只处理的分支 ref
 	CLITimeout       time.Duration     // SPECWIRE_CLI_TIMEOUT：multica CLI 调用超时
 	LogLevel         slog.Level        // SPECWIRE_LOG_LEVEL：debug|info|warn|error
-	GitLabToken      string            // SPECWIRE_GITLAB_TOKEN：GitLab API token（scope 至少 issues；v2 归档关 Issue）
+	GitLabToken      string            // SPECWIRE_GITLAB_TOKEN：仅供显式 legacy .env 导入；persistent-only 请求不得读取
 	GitLabURL        string            // SPECWIRE_GITLAB_URL：GitLab API 基址（容器网络内可达）
 	WebhookURL       string            // SPECWIRE_WEBHOOK_URL：GitLab webhook 回调地址（hook 自动编排用，admin API）
 	AdminToken       string            // SPECWIRE_ADMIN_TOKEN：admin API 访问 token（未配置时仅回环可访问）
 	PersistentOnly   bool              // SPECWIRE_PERSISTENT_ONLY：跳过旧 .env 路由配置，仅运行持久化控制面
+	LegacyImport     bool              // SPECWIRE_LEGACY_IMPORT：显式启用旧 .env → 持久化控制面导入
 	RetentionDays    int               // SPECWIRE_RETENTION_DAYS：脱敏事件/节点快照的保留天数
 }
 
@@ -54,6 +55,15 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("SPECWIRE_PERSISTENT_ONLY %q is not a valid boolean: %w", os.Getenv("SPECWIRE_PERSISTENT_ONLY"), err)
 	}
 	cfg.PersistentOnly = persistentOnly
+	legacyImportDefault := "false"
+	if !persistentOnly {
+		legacyImportDefault = "true"
+	}
+	legacyImport, err := parseBool(getenv("SPECWIRE_LEGACY_IMPORT", legacyImportDefault))
+	if err != nil {
+		return nil, fmt.Errorf("SPECWIRE_LEGACY_IMPORT %q is not a valid boolean: %w", os.Getenv("SPECWIRE_LEGACY_IMPORT"), err)
+	}
+	cfg.LegacyImport = legacyImport
 	if raw := strings.TrimSpace(os.Getenv("SPECWIRE_RETENTION_DAYS")); raw != "" {
 		days, parseErr := strconv.Atoi(raw)
 		if parseErr != nil || days < 1 || days > 3650 {

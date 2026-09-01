@@ -23,6 +23,7 @@ type Store interface {
 	CreateFlowTemplate(context.Context, domain.FlowTemplate) error
 	GetFlowTemplate(context.Context, domain.ID, string, string) (domain.FlowTemplate, error)
 	ListFlowTemplates(context.Context, domain.ID) ([]domain.FlowTemplate, error)
+	ListFlows(context.Context, domain.ID, domain.ID) ([]domain.Flow, error)
 }
 
 type RouteActivator interface {
@@ -64,6 +65,39 @@ func (s *Service) SeedBuiltins(ctx context.Context, workspaceID domain.ID) error
 		}
 	}
 	return nil
+}
+
+// EnsureAbandonFlow installs the reserved lifecycle Flow for a Connection.
+// It is deliberately idempotent: an existing published Flow is left alone,
+// while a draft or paused reserved Flow is published so the Issue label route
+// can be reconciled. The reserved Flow is the runtime representation of the
+// controlled specwire::abandoned label; it is not a user-created provider
+// connection.
+func (s *Service) EnsureAbandonFlow(ctx context.Context, workspaceID, connectionID, actorID domain.ID) (domain.Flow, error) {
+	items, err := s.store.ListFlows(ctx, workspaceID, connectionID)
+	if err != nil {
+		return domain.Flow{}, err
+	}
+	for _, item := range items {
+		if item.Name != "Abandon Change" {
+			continue
+		}
+		if item.Status == domain.FlowPublished || item.Status == domain.FlowArchived {
+			return item, nil
+		}
+		if _, _, err := s.Publish(ctx, workspaceID, item.ID, actorID); err != nil {
+			return domain.Flow{}, err
+		}
+		return s.store.GetFlow(ctx, workspaceID, item.ID)
+	}
+	item, err := s.CreateFromTemplate(ctx, workspaceID, connectionID, actorID, TemplateAbandonChange, "1.0.0", "Abandon Change")
+	if err != nil {
+		return domain.Flow{}, err
+	}
+	if _, _, err := s.Publish(ctx, workspaceID, item.ID, actorID); err != nil {
+		return domain.Flow{}, err
+	}
+	return s.store.GetFlow(ctx, workspaceID, item.ID)
 }
 
 func (s *Service) CreateBlank(ctx context.Context, workspaceID, connectionID, actorID domain.ID, name string) (domain.Flow, error) {

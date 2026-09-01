@@ -131,6 +131,11 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	}
 	base := server.URL + "/api/v1/workspaces/" + string(workspaceID)
 
+	status, body = jsonRequest(t, client, http.MethodGet, base+"/connections", "", nil)
+	if status != http.StatusOK || !strings.Contains(body, `"flow_count":0`) || !strings.Contains(body, `"resource_count":0`) || !strings.Contains(body, `"status":"healthy"`) {
+		t.Fatalf("connection list summary before Flow = %d %s", status, body)
+	}
+
 	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows", `{"connection_id":"connection-api","template_key":"publish-change","template_version":"1.0.0","name":"Publish Change"}`, csrf)
 	if status != http.StatusCreated {
 		t.Fatalf("create Flow status = %d body=%s", status, body)
@@ -138,6 +143,10 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	var created domain.Flow
 	if err := json.Unmarshal([]byte(body), &created); err != nil {
 		t.Fatal(err)
+	}
+	status, body = jsonRequest(t, client, http.MethodGet, base+"/connections", "", nil)
+	if status != http.StatusOK || !strings.Contains(body, `"flow_count":1`) {
+		t.Fatalf("connection list summary after Flow = %d %s", status, body)
 	}
 	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(created.ID)+"/simulate", `{"sample_event":{"object_kind":"issue","object_attributes":{"iid":7,"action":"open","description":"change_id: CHG-7\nbranch: change/7\nbranch_head_sha: abc123\n","labels":[{"title":"change"}]},"project":{"path_with_namespace":"platform/webdeck"}}}`, csrf)
 	if status != http.StatusOK || !strings.Contains(body, `"external_actions_suppressed":true`) || !strings.Contains(body, `"status":"suppressed"`) {
@@ -161,13 +170,29 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(body, `"version":`) {
 		t.Fatalf("publish Flow = %d %s", status, body)
 	}
-	status, _ = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(created.ID)+"/test", `{"confirm_side_effects":false}`, csrf)
-	if status != http.StatusBadRequest {
-		t.Fatalf("unconfirmed live test status = %d", status)
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(created.ID)+"/test", `{"confirm_side_effects":false}`, csrf)
+	if status != http.StatusBadRequest || !strings.Contains(body, "confirm_side_effects=true") {
+		t.Fatalf("unconfirmed live test = %d %s", status, body)
 	}
 	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(created.ID)+"/test", `{"confirm_side_effects":true}`, csrf)
 	if status != http.StatusAccepted || !strings.Contains(body, `"side_effects_confirmed":true`) || !strings.Contains(body, `"live-test:`) {
 		t.Fatalf("live test = %d %s", status, body)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows", `{"connection_id":"connection-api","template_key":"complete-archive","template_version":"1.0.0","name":"Complete Archive"}`, csrf)
+	if status != http.StatusCreated {
+		t.Fatalf("create Complete Archive Flow = %d %s", status, body)
+	}
+	var archiveFlow domain.Flow
+	if err := json.Unmarshal([]byte(body), &archiveFlow); err != nil {
+		t.Fatal(err)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(archiveFlow.ID)+"/publish", "{}", csrf)
+	if status != http.StatusOK {
+		t.Fatalf("publish Complete Archive Flow = %d %s", status, body)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/flows/"+string(archiveFlow.ID)+"/test", `{"confirm_side_effects":true}`, csrf)
+	if status != http.StatusAccepted || !strings.Contains(body, `"side_effects_confirmed":true`) || !strings.Contains(body, `"live-test:`) {
+		t.Fatalf("Complete Archive live test = %d %s", status, body)
 	}
 	var liveTest struct {
 		Execution domain.FlowExecution `json:"execution"`
@@ -181,8 +206,24 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	if err := db.UpdateFlowExecution(context.Background(), liveTest.Execution); err != nil {
 		t.Fatal(err)
 	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/executions/"+string(liveTest.Execution.ID)+"/attention", `{"status":"acknowledged"}`, csrf)
+	if status != http.StatusOK || !strings.Contains(body, `"status":"reconciliation-required"`) || !strings.Contains(body, `"attention_status":"acknowledged"`) {
+		t.Fatalf("acknowledge execution = %d %s", status, body)
+	}
+	status, body = jsonRequest(t, client, http.MethodGet, base+"/executions/"+string(liveTest.Execution.ID), "", nil)
+	if status != http.StatusOK || !strings.Contains(body, `"status":"reconciliation-required"`) || !strings.Contains(body, `"attention_status":"acknowledged"`) || !strings.Contains(body, `"attention_actor_account_id":`) {
+		t.Fatalf("execution detail after acknowledge = %d %s", status, body)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/executions/"+string(liveTest.Execution.ID)+"/attention", `{"status":"open"}`, csrf)
+	if status != http.StatusOK || !strings.Contains(body, `"attention_status":"open"`) {
+		t.Fatalf("reopen execution attention = %d %s", status, body)
+	}
+	status, body = jsonRequest(t, client, http.MethodGet, base+"/audit-events?entity_type=flow_execution&entity_id="+string(liveTest.Execution.ID), "", nil)
+	if status != http.StatusOK || !strings.Contains(body, "execution.attention.update") {
+		t.Fatalf("execution attention audit = %d %s", status, body)
+	}
 	status, body = jsonRequest(t, client, http.MethodPost, base+"/executions/"+string(liveTest.Execution.ID)+"/repair", `{}`, csrf)
-	if status != http.StatusAccepted || !strings.Contains(body, `"status":"queued"`) {
+	if status != http.StatusAccepted || !strings.Contains(body, `"status":"queued"`) || !strings.Contains(body, `"attention_status":"none"`) {
 		t.Fatalf("repair execution = %d %s", status, body)
 	}
 	status, body = jsonRequest(t, client, http.MethodGet, base+"/flows/"+string(created.ID)+"/versions", "", nil)
@@ -217,6 +258,22 @@ func TestIntegrationFlowAPIUsesConnectionScopeAndLifecycle(t *testing.T) {
 	status, body = jsonRequest(t, client, http.MethodPatch, base+"/registry/connector-types/"+string(registered.ID), `{"status":"published"}`, csrf)
 	if status != http.StatusOK || !strings.Contains(body, `"status":"published"`) {
 		t.Fatalf("publish connector type = %d %s", status, body)
+	}
+	status, body = jsonRequest(t, client, http.MethodGet, base+"/registry/adapter-operations", "", nil)
+	if status != http.StatusOK || !strings.Contains(body, "gitlab.events.issue") || !strings.Contains(body, "multica.issue.create") {
+		t.Fatalf("list allowlisted adapter operations = %d %s", status, body)
+	}
+	status, body = jsonRequest(t, client, http.MethodPost, base+"/registry/connector-behaviors", `{"connector_type_key":"custom","connector_type_version":"1.0.0","key":"custom.accept-event","version":"1.0.0","display_name":"Accept Event","direction":"input","output_model_ref":"provider:gitlab.issue.v1","provider_event_schema":{"type":"object"},"required_capabilities":["gitlab.project.webhook.read"],"adapter_operation":"gitlab.events.issue","idempotency_strategy":"provider_delivery_id","reconciliation":"delivery_lookup","status":"draft"}`, csrf)
+	if status != http.StatusCreated {
+		t.Fatalf("register connector behavior = %d %s", status, body)
+	}
+	var registeredBehavior domain.ConnectorBehavior
+	if err := json.Unmarshal([]byte(body), &registeredBehavior); err != nil {
+		t.Fatal(err)
+	}
+	status, body = jsonRequest(t, client, http.MethodPatch, base+"/registry/connector-behaviors/"+string(registeredBehavior.ID), `{"status":"published"}`, csrf)
+	if status != http.StatusOK || !strings.Contains(body, `"status":"published"`) {
+		t.Fatalf("publish connector behavior = %d %s", status, body)
 	}
 
 	status, body = jsonRequest(t, client, http.MethodPost, base+"/registry/data-models", `{"key":"CustomEvent","version":"v1","display_name":"Custom Event","schema":{"type":"object","properties":{"event_id":{"type":"string"}}},"required_fields":["event_id"],"allow_extensions":true,"status":"published"}`, csrf)

@@ -69,8 +69,8 @@ func TestMigrationsAreVersionedAndIdempotent(t *testing.T) {
 	if err := first.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil {
 		t.Fatalf("schema_migrations: %v", err)
 	}
-	if migrations != 13 {
-		t.Fatalf("migrations = %d, want 13", migrations)
+	if migrations != 16 {
+		t.Fatalf("migrations = %d, want 16", migrations)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -83,8 +83,8 @@ func TestMigrationsAreVersionedAndIdempotent(t *testing.T) {
 	if err := second.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&migrations); err != nil {
 		t.Fatal(err)
 	}
-	if migrations != 13 {
-		t.Fatalf("migrations after reopen = %d, want 13", migrations)
+	if migrations != 16 {
+		t.Fatalf("migrations after reopen = %d, want 16", migrations)
 	}
 	var legacyConnectorTables int
 	if err := second.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'connector_instances'`).Scan(&legacyConnectorTables); err != nil {
@@ -185,7 +185,7 @@ func TestRegistryBootstrapIsIdempotentAndImmutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.ConnectorTypes != 2 || counts.Behaviors != 4 || counts.DataModels != 4 {
+	if counts.ConnectorTypes != 2 || counts.Behaviors != 5 || counts.DataModels != 5 {
 		t.Fatalf("registry counts = %+v", counts)
 	}
 	bundle.DataModels[0].DisplayName = "changed after publication"
@@ -219,6 +219,95 @@ func TestWorkspaceScopedConnectionLookupAndActiveConflicts(t *testing.T) {
 	}
 	if err := s.CreateConnection(ctx, testConnection("workspace-one", "connection-two", "gitlab-one", "multica-one", "project-1", "target-2")); err != nil {
 		t.Fatalf("disabled connection should release active source: %v", err)
+	}
+}
+
+func TestConnectionStatsAggregatesWorkspaceScopedRecords(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	workspace := testWorkspace(t, s, "workspace-connection-stats")
+	testEndpoints(t, s, workspace.ID, "gitlab-connection-stats", "multica-connection-stats", "stats")
+	connection := testConnection(workspace.ID, "connection-stats", "gitlab-connection-stats", "multica-connection-stats", "source-stats", "target-stats")
+	if err := s.CreateConnection(ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := s.GetConnectionStats(ctx, workspace.ID, connection.ID)
+	if err != nil {
+		t.Fatalf("empty connection stats: %v", err)
+	}
+	if stats.FlowCount != 0 || stats.ResourceCount != 0 || stats.ExecutionCount != 0 {
+		t.Fatalf("empty connection stats = %+v", stats)
+	}
+
+	flow := domain.Flow{ID: "flow-connection-stats", WorkspaceID: workspace.ID, ConnectionID: connection.ID, Name: "Stats Flow", Status: domain.FlowPublished, ActiveVersion: 1}
+	if err := s.CreateFlow(ctx, flow); err != nil {
+		t.Fatalf("CreateFlow: %v", err)
+	}
+	version := domain.FlowVersion{ID: "flow-version-connection-stats", WorkspaceID: workspace.ID, FlowID: flow.ID, Version: 1, Status: domain.FlowPublished, Graph: testGraph()}
+	if err := s.SaveFlowVersion(ctx, version); err != nil {
+		t.Fatalf("SaveFlowVersion: %v", err)
+	}
+	if _, err := s.EnsureManagedResource(ctx, domain.ManagedResource{
+		ID: "resource-connection-stats", WorkspaceID: workspace.ID, ConnectionID: connection.ID,
+		Kind: domain.ResourceProject, Provider: domain.ProviderGitLab, InstanceID: "gitlab-connection-stats",
+		ExternalID: "source-stats", Ownership: domain.OwnershipManaged, Status: "ready",
+	}); err != nil {
+		t.Fatalf("EnsureManagedResource: %v", err)
+	}
+	if _, err := s.EnsureManagedResource(ctx, domain.ManagedResource{
+		ID: "resource-connection-stats-target", WorkspaceID: workspace.ID, ConnectionID: connection.ID,
+		Kind: domain.ResourceProject, Provider: domain.ProviderMultica, InstanceID: "multica-connection-stats",
+		ExternalID: "target-stats", Ownership: domain.OwnershipAdopted, Status: "ready",
+	}); err != nil {
+		t.Fatalf("EnsureManagedResource target: %v", err)
+	}
+	if err := s.CreateFlowExecution(ctx, domain.FlowExecution{
+		ID: "execution-connection-stats", WorkspaceID: workspace.ID, ConnectionID: connection.ID,
+		FlowID: flow.ID, FlowVersionID: version.ID, FlowVersion: 1, EventID: "event-connection-stats",
+		IdempotencyKey: "idempotency-connection-stats", CorrelationID: "correlation-connection-stats",
+		Status: domain.ExecutionSucceeded,
+	}); err != nil {
+		t.Fatalf("CreateFlowExecution: %v", err)
+	}
+	failureTime := time.Now().UTC().Add(time.Second)
+	if err := s.CreateFlowExecution(ctx, domain.FlowExecution{
+		ID: "execution-connection-stats-failed", WorkspaceID: workspace.ID, ConnectionID: connection.ID,
+		FlowID: flow.ID, FlowVersionID: version.ID, FlowVersion: 1, EventID: "event-connection-stats-failed",
+		IdempotencyKey: "idempotency-connection-stats-failed", CorrelationID: "correlation-connection-stats-failed",
+		Status: domain.ExecutionFailed, ErrorCategory: "provider", ErrorMessage: "temporary provider failure",
+		CreatedAt: failureTime, UpdatedAt: failureTime,
+	}); err != nil {
+		t.Fatalf("Create failed FlowExecution: %v", err)
+	}
+
+	stats, err = s.GetConnectionStats(ctx, workspace.ID, connection.ID)
+	if err != nil {
+		t.Fatalf("populated connection stats: %v", err)
+	}
+	if stats.FlowCount != 1 || stats.ResourceCount != 2 || stats.ExecutionCount != 2 || stats.SuccessfulExecutionCount != 1 || stats.UnacknowledgedExecutionCount != 1 {
+		t.Fatalf("populated connection stats = %+v", stats)
+	}
+	if stats.LatestExecutionStatus != domain.ExecutionFailed || stats.LatestExecutionAttentionStatus != domain.ExecutionAttentionOpen || stats.LatestExecutionAt == nil {
+		t.Fatalf("latest execution stats = %+v", stats)
+	}
+	failed, err := s.GetFlowExecution(ctx, workspace.ID, "execution-connection-stats-failed")
+	if err != nil {
+		t.Fatalf("get failed execution: %v", err)
+	}
+	acknowledgedAt := time.Now().UTC()
+	failed.AttentionStatus = domain.ExecutionAttentionAcknowledged
+	failed.AttentionActorAccountID = "account-connection-stats"
+	failed.AttentionUpdatedAt = &acknowledgedAt
+	if err := s.UpdateFlowExecution(ctx, failed); err != nil {
+		t.Fatalf("acknowledge failed execution: %v", err)
+	}
+	stats, err = s.GetConnectionStats(ctx, workspace.ID, connection.ID)
+	if err != nil {
+		t.Fatalf("connection stats after acknowledge: %v", err)
+	}
+	if stats.UnacknowledgedExecutionCount != 0 || stats.LatestExecutionStatus != domain.ExecutionFailed || stats.LatestExecutionAttentionStatus != domain.ExecutionAttentionAcknowledged {
+		t.Fatalf("connection stats after acknowledge = %+v", stats)
 	}
 }
 
