@@ -65,6 +65,7 @@ func TestClientListsProjectsAndUsesProviderIDs(t *testing.T) {
 
 func TestClientEnsuresLabelAndSharedHook(t *testing.T) {
 	var labelCreates, hookCreates, hookUpdates int
+	var hookSigningToken, hookSecretToken string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Request-ID", "request-2")
@@ -81,6 +82,11 @@ func TestClientEnsuresLabelAndSharedHook(t *testing.T) {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/hooks"):
 			_, _ = w.Write([]byte(`[{"id":11,"url":"https://specwire.example/hook","push_events":true,"issues_events":true}]`))
 		case r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, "/hooks/11"):
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse hook form: %v", err)
+			}
+			hookSigningToken = r.Form.Get("signing_token")
+			hookSecretToken = r.Form.Get("token")
 			hookUpdates++
 			_, _ = w.Write([]byte(`{"id":11}`))
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/hooks"):
@@ -106,6 +112,9 @@ func TestClientEnsuresLabelAndSharedHook(t *testing.T) {
 	hook, err := client.EnsureHook(context.Background(), instance, project, provider.HookSpec{URL: "https://specwire.example/hook", Events: []string{"Issue Hook", "Push Hook"}, SigningToken: []byte("whsec-test")}, credential)
 	if err != nil || !hook.Adopted || hook.ExternalID != "11" || hookCreates != 0 || hookUpdates != 1 {
 		t.Fatalf("updated hook = %+v, creates=%d updates=%d err=%v", hook, hookCreates, hookUpdates, err)
+	}
+	if hookSigningToken != "whsec-test" || hookSecretToken != "" {
+		t.Fatalf("hook credentials = signing_token %q, token %q", hookSigningToken, hookSecretToken)
 	}
 	if _, err := json.Marshal(hook); err != nil {
 		t.Fatal(err)

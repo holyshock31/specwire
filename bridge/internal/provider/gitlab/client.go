@@ -364,7 +364,7 @@ func hookEvents(events []string) (push, issues bool) {
 }
 
 func hookForm(hookURL, token string, push, issues bool) url.Values {
-	return url.Values{"url": []string{hookURL}, "token": []string{token}, "push_events": []string{strconv.FormatBool(push)}, "issues_events": []string{strconv.FormatBool(issues)}}
+	return url.Values{"url": []string{hookURL}, "signing_token": []string{token}, "push_events": []string{strconv.FormatBool(push)}, "issues_events": []string{strconv.FormatBool(issues)}}
 }
 
 func categoryForStatus(status int) provider.ErrorCategory {

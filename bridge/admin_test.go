@@ -292,14 +292,17 @@ func TestAdminUpsertHookCreates(t *testing.T) {
 	if r["hook_id"] != float64(100) {
 		t.Errorf("hook_id = %v, want 100", r["hook_id"])
 	}
-	// GitLab 收到 token（whsec_ 前缀）
+	// GitLab 收到 signing_token（whsec_ 前缀），而不是旧的明文 secret token。
 	req := stub.lastReq(t)
 	if req.Method != http.MethodPost {
 		t.Errorf("method = %s, want POST", req.Method)
 	}
-	token := req.Form.Get("token")
+	token := req.Form.Get("signing_token")
 	if !strings.HasPrefix(token, "whsec_") || len(token) != len("whsec_")+44 {
-		t.Errorf("token = %q, want whsec_ + 32-byte base64", token)
+		t.Errorf("signing_token = %q, want whsec_ + 32-byte base64", token)
+	}
+	if got := req.Form.Get("token"); got != "" {
+		t.Errorf("legacy token = %q, want empty", got)
 	}
 	// 运行时 secrets 记录
 	secrets := cfgPtr.Load().WebhookSecrets
@@ -363,9 +366,12 @@ func TestAdminRotateToken(t *testing.T) {
 	if req.Method != http.MethodPut {
 		t.Fatalf("rotate method = %s, want PUT", req.Method)
 	}
-	newToken := req.Form.Get("token")
+	newToken := req.Form.Get("signing_token")
 	if newToken == "" || newToken == oldToken {
 		t.Errorf("new token = %q, old = %q", newToken, oldToken)
+	}
+	if got := req.Form.Get("token"); got != "" {
+		t.Errorf("legacy token = %q, want empty", got)
 	}
 
 	secrets := cfgPtr.Load().WebhookSecrets

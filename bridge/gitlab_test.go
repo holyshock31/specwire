@@ -168,8 +168,11 @@ func TestGitlabCreateHook(t *testing.T) {
 	if got := req.Form.Get("url"); got != "http://bridge/gitlab/specwire" {
 		t.Errorf("url = %q", got)
 	}
-	if got := req.Form.Get("token"); got != "whsec_abc" {
-		t.Errorf("token = %q", got)
+	if got := req.Form.Get("signing_token"); got != "whsec_abc" {
+		t.Errorf("signing_token = %q", got)
+	}
+	if got := req.Form.Get("token"); got != "" {
+		t.Errorf("legacy token = %q, want empty", got)
 	}
 	if req.Form.Get("push_events") != "true" || req.Form.Get("issues_events") != "true" {
 		t.Errorf("events = push:%q issues:%q", req.Form.Get("push_events"), req.Form.Get("issues_events"))
@@ -189,8 +192,11 @@ func TestGitlabUpdateHook(t *testing.T) {
 	if req.Method != http.MethodPut || req.Path != "/api/v4/projects/personal/webdeck/hooks/5" {
 		t.Errorf("req = %s %s", req.Method, req.Path)
 	}
-	if got := req.Form.Get("token"); got != "whsec_new" {
-		t.Errorf("token = %q, want whsec_new", got)
+	if got := req.Form.Get("signing_token"); got != "whsec_new" {
+		t.Errorf("signing_token = %q, want whsec_new", got)
+	}
+	if got := req.Form.Get("token"); got != "" {
+		t.Errorf("legacy token = %q, want empty", got)
 	}
 }
 
