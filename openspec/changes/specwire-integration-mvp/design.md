@@ -122,7 +122,8 @@ MVP 的内置模型和默认绑定先固定为以下契约：
 | `ArchiveCompletion.v1` | `change_id`、source project identity、target ref；另带 provider delivery identity | 只承载 `main` 上的 `archived` 完成信号，用于查找既有 projection 并转为 `done` |
 | `ChangeLifecycle.v1` | `change_id`、source project identity、target ref、provider delivery identity、lifecycle event/reason | 受控 `specwire::abandoned` 标签新增转换为 `abandoned`；必须携带有限的 reason，用于查找既有 projection 并转为 `cancelled`，不得创建新 projection |
 | `MulticaCreateIssueInput.v1` | target project identity、title、description | target project 默认 `$connection.target_project`；title 默认 `[SpecWire] {change_id}`；status 默认 `backlog`；assignee 可选 |
-| `MulticaCompleteIssueInput.v1` | correlated projection lookup selector / `change_id`、desired status | 内置 completion 将 `change_id` 作为稳定查找选择器；运行时只从当前 Connection 下已持久化的各 publication Flow correlation 解析真实目标 ID，不根据 provider payload 猜测无关 issue；`archived` 请求 `done`，`abandoned` 请求 `cancelled`，后者必须带 reason |
+| `MulticaCompleteIssueInput.v1` | correlated projection lookup selector / `change_id`、desired status | 归档 completion 将 `change_id` 作为稳定查找选择器并固定请求 `done`；运行时只从当前 Connection 下已持久化的各 publication Flow correlation 解析真实目标 ID，不根据 provider payload 猜测无关 issue |
+| `MulticaCancelIssueInput.v1` | correlated projection lookup selector / `change_id`、desired status、lifecycle event/reason | abandon Flow 固定请求 `cancelled` 和 `abandoned`，并要求有限的 reason；它与 `multica.cancel-issue` 行为共用已部署的 `multica.issue.status` adapter。新增取消契约用于保留已发布 `MulticaCompleteIssueInput.v1` 的不可变语义 |
 
 Provider event schema 仍归 ConnectorBehavior 管理，不把 GitLab 原始 payload 的全部字段硬编码进 canonical DataModel。内置 GitLab Issue publication 行为固定匹配 `object_kind=issue`、`action=open` 和 Issue label `change`；内置 GitLab abandon 行为固定匹配 `Issue Hook` 的 `action=update`，且 `changes.labels.current` 新增精确的 `specwire::abandoned`、`changes.labels.previous` 不含该标签，并要求 Issue 描述可解析出 `change_id`；内置 GitLab Push 行为只匹配 `refs/heads/main` 上的 `archived` completion event。
 
@@ -296,7 +297,7 @@ publish-change:
   abandon-change (reserved):
   GitLab Issue Hook(update + specwire::abandoned label transition)
   → Parse/Normalize → ChangeLifecycle.v1
-  → Mapping/Template → Multica Complete Issue(cancelled)
+  → Mapping/Template → Multica Cancel Issue(cancelled)
 ```
 
 切换期间可以保留有限的兼容读取和单次回滚开关，但不允许新模型和旧 `SPECWIRE_PROJECT_MAP` 同时作为两个活动路由源。成功切换后，旧固定 handler 只保留为迁移参考并移除其直接业务分支。
@@ -392,7 +393,7 @@ MVP 的 secret store 使用由部署环境注入的 master key 对 SQLite 中的
 
 ## Risks / Trade-offs
 
-- **[Risk] 图编辑器容易把产品变成通用工作流平台** → 第一版只注册三个 GenericNode、有限 DAG 和四个 provider behaviors，发布校验拒绝未注册能力。
+- **[Risk] 图编辑器容易把产品变成通用工作流平台** → 第一版只注册三个 GenericNode、有限 DAG 和 MVP provider behaviors，发布校验拒绝未注册能力。
 - **[Risk] DataModel registry 与 adapter 语义不一致** → ConnectorBehavior 声明 model/role contract，发布和执行前都做 schema/required-role 校验，模型版本不可变。
 - **[Risk] 多 Flow 共用 Hook 造成重复业务动作** → 路由按 Flow 独立幂等，发布时提示潜在重叠，运行时不做隐式 first-match。
 - **[Risk] 外部调用超时导致重复副作用** → 每个 output behavior 必须提供幂等策略或 reconciliation；不确定结果进入 indeterminate，而不是直接 retry。

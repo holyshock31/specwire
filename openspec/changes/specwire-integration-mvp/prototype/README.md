@@ -1,6 +1,6 @@
 # SpecWire 原型材料
 
-这里保存本 Change 的候选原型和视觉参考，不是生产实现，也不是已经接受的产品体验契约。
+这里保存本 Change 形成期间使用的原型和视觉参考。图片不是生产实现；本 Change 被接受后，当前产品体验以 `openspec/specs/experience/integration-control-plane.md` 为准，图片随 Change 归档并保留设计溯源。
 
 ## 当前材料
 
@@ -12,7 +12,7 @@
 
 ## 与规约的关系
 
-这些图片是 `openspec/changes/specwire-integration-mvp/` 的候选视觉参考，不是生产实现，也不是已经接受的产品体验契约。`openspec/specs/` 仍然只记录已经接受并实现的行为；在本 Change 实现、验收并归档前，不要求主 specs 与图片中的新控制面和 Flow 模型一致。
+这些图片是 `openspec/changes/specwire-integration-mvp/` 的视觉参考，不是生产实现或独立行为契约。当前产品体验由 `openspec/specs/experience/integration-control-plane.md` 归纳表达；图片中与该文档、已发布行为规约或实际实现冲突的细节只保留为历史设计证据。
 
 ## 页面范围
 
@@ -25,7 +25,7 @@
 
 ## 术语与状态约定
 
-- Builder 中 GitLab Issue Hook 下的“事件契约”标签表示 `ConnectorBehavior` 的 provider 事件契约，不是 DataModel registry 中的模型。图片中若出现 `GitLabIssueEvent.v1` 这样的版本串，也只表示该 provider contract 的版本；DataModel 以端口/边契约展示，当前内置模型包括 `ChangePublication.v1`、`ArchiveCompletion.v1`、`ChangeLifecycle.v1`、`MulticaCreateIssueInput.v1` 和 `MulticaCompleteIssueInput.v1`。
+- Builder 中 GitLab Issue Hook 下的“事件契约”标签表示 `ConnectorBehavior` 的 provider 事件契约，不是 DataModel registry 中的模型。图片中若出现 `GitLabIssueEvent.v1` 这样的版本串，也只表示该 provider contract 的版本；DataModel 以端口/边契约展示，当前内置模型包括 `ChangePublication.v1`、`ArchiveCompletion.v1`、`ChangeLifecycle.v1`、`MulticaCreateIssueInput.v1`、`MulticaCompleteIssueInput.v1` 和 `MulticaCancelIssueInput.v1`。
 - 执行详情中的重试只对失败或不确定结果、且可以安全继续的执行启用；成功执行不提供可用的重试动作。重放始终需要选择 FlowVersion，并明确确认可能产生的外部副作用。
 - Flow 内没有 `ConnectorInstance`；画布节点表示已注册的 ConnectorBehavior 或受控 GenericNode 加参数绑定，Connection 才拥有项目、资源、共享 Hook 和授权边界。
 

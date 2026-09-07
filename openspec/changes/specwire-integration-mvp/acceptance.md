@@ -308,7 +308,35 @@
 | L-02 | 已有 Change Issue 的 `Issue Hook update` 明确新增 `specwire::abandoned` 标签后转为 `cancelled` | **通过（定向自动化）** | `TestAbandonIssueRequiresControlledLabelTransition`、`TestIngressAndExecutorAbandonCancelsProjection`；状态、Correlation、GitLab note/close 均有断言 |
 | L-03 | abandon 路由只接受精确标签 transition；标签已存在、没有 `changes.labels`、仅描述变更或其他 action 均不触发 | **通过（定向自动化）** | `internal/runtime/lifecycle_test.go` 覆盖新增标签、已有标签、无 label diff、无关更新和错误 action |
 | L-04 | 取消后的投影不会被重复 abandon、Bridge 自己的后处理更新或较晚 archived 事件复活 | **通过（定向自动化）** | `TestIngressAndExecutorAbandonCancelsProjection` 断言终态保护以及不重复调用 Multica、GitLab note/close |
-| L-05 | persistent-only 运行时使用 Connection 绑定的 Multica profile | **待运行态复验** | 代码路径由 `MulticaAdapter` 使用持久化实例/profile；需重建并重启 worktree Bridge 后用真实 `WW1-20` 做一次受控验证 |
+| L-05 | persistent-only 运行时使用 Connection 绑定的 Multica profile | **待真实生命周期事件复验** | Bridge 已在 worktree 重建并稳定启动；取消 Flow 使用 Connection 的持久化 Multica instance/profile。真实 `WW1-20` 状态变更仍需一次受控 abandoned label transition 验证 |
 | L-06 | Multica 看板展示取消状态 | **不属于 SpecWire 本 Change** | 当前 Multica 前端未提供 Cancelled 列；这不影响 API/CLI 的 `cancelled` 状态。若产品要求看板可见，需要在 Multica 产品/镜像侧另立变更 |
 
 本轮只修改 worktree 中的 Bridge 和 Change 文档，没有重启当前运行容器；因此 `127.0.0.1:8787` 仍可能运行旧镜像，真实 `WW1-20` 的取消状态不会因本轮代码落盘自动改变。部署和真实 E2E 仍属于任务 `8.6`，需单独授权后执行。
+
+## persistent Bridge 预置 Flow 修复（2026-09-02）
+
+本轮发现已有数据库中的 `MulticaCompleteIssueInput@v1` 是早期已发布的完成模型，按不可变契约不能直接扩展为取消模型。修复后保留该 v1 定义，新增 `MulticaCancelIssueInput@v1` 与 `multica.cancel-issue@1.0.0`，取消行为仍通过已部署的 `multica.issue.status` adapter 使用 Connection 绑定的 Multica profile。
+
+| 编号 | 验收场景 | 结果 | 证据 |
+|---|---|---|---|
+| L-07 | 已有 persistent 数据库在重启时不因不可变 completion 模型冲突而失败，并自动补齐 abandon Flow/route | **通过（单测 + 运行态）** | `go test ./...` 全部通过；`docker compose up -d --build bridge` 后容器稳定 `Up`，日志只有 `persistent-only cutover enabled`/`bridge listening`；数据库包含 `abandon-change` 模板、2 个已发布 `Abandon Change` Flow 和 2 条 active `gitlab.issue-abandon-hook` 路由 |
+
+本轮未重放已存在的 abandoned 标签事件，也未修改 GitLab Issue 或 Multica issue 状态；由于 abandon matcher 要求标签从不存在到新增，历史事件不会在路由补齐后自动重放。
+
+## 人工验收与归档前语义整理（2026-09-07）
+
+产品负责人已明确完成人工验收并接受 `specwire-integration-mvp` 的当前产品体验。该结论完成此前记录的视觉和主路径人工闸门，但不把未执行的自动化、真实外部副作用或归档动作伪造为已经执行；`tasks.md` 中仍未完成的自动化与归档项目继续保留原状态，供归档历史追溯。
+
+归档前按仓库文档职责完成以下语义整理：
+
+| 分类 | 当前态处理 |
+|---|---|
+| behavior | `changes/specwire-integration-mvp/specs/behavior/` 继续作为 OpenSpec delta；新增 Requirement 使用 `ADDED`，改名且修改的 Requirement 使用 `RENAMED + MODIFIED`，由 `openspec archive` 确定性合并 |
+| domain | `openspec/specs/domain/context.md` 补充 Abandon Event、Multica Cancel Issue 行为示例以及 `done`/`cancelled` 互斥终态 |
+| architecture | ADR 0006/0007 保留决策理由；`openspec/specs/architecture/integration-platform.md` 从本 Change 的技术设计提炼当前结构，不复制完整实施过程 |
+| experience | `openspec/specs/experience/integration-control-plane.md` 综合三张原型、已接受页面关系和后续交互修正，成为当前体验契约 |
+| history | `proposal.md`、`design.md`、`tasks.md`、本验收记录和 `prototype/` 保留在归档 Change 中，不直接复制为当前行为规格 |
+
+本次整理不改变产品范围或实现代码。图片与当前体验契约冲突时，published experience、published behavior 和实际实现优先；原型只承担设计溯源。
+
+归档机械可应用性已在一次性 detached worktree 中验证：`openspec validate specwire-integration-mvp --strict` 通过，`openspec archive specwire-integration-mvp -y --json` 成功应用 17 个新增、12 个修改和 2 个改名，归档结果再经 `openspec validate --all --strict` 验证为 4/4 通过。该试跑未修改正式分支、未推送归档事件，也不等同于已经完成正式归档。

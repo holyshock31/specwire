@@ -1,0 +1,26 @@
+{
+  "key": "MulticaCancelIssueInput",
+  "version": "v1",
+  "display_name": "Multica Cancel Issue Input",
+  "description": "Target lifecycle action input for cancelling a correlated Multica issue.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "correlation_id": {"type": "string"},
+      "change_id": {"type": "string"},
+      "desired_status": {"type": "string", "const": "cancelled"},
+      "lifecycle_event": {"type": "string", "const": "abandoned"},
+      "lifecycle_reason": {"type": "string"}
+    }
+  },
+  "required_fields": ["correlation_id", "change_id", "desired_status", "lifecycle_event", "lifecycle_reason"],
+  "semantic_roles": {
+    "correlation_id": "projection_identity",
+    "change_id": "change_identity",
+    "desired_status": "completion_status",
+    "lifecycle_event": "lifecycle_event",
+    "lifecycle_reason": "lifecycle_reason"
+  },
+  "allow_extensions": false,
+  "status": "published"
+}

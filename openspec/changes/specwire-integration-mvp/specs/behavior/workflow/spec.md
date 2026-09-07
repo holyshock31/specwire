@@ -38,3 +38,8 @@ SpecWire MUST expose a narrow Integration Flow boundary for the current GitLab-t
 
 - **WHEN** an existing Change Issue receives a new `specwire::abandoned` label and the reserved abandon Flow matches its Issue update
 - **THEN** the Flow cancels the correlated projection and does not create another task or mark it done
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: SpecWire 只处理发布与归档两个集成事件`
+- TO: `### Requirement: SpecWire 只处理发布、归档与受控废弃三个集成事件`

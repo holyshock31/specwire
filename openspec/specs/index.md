@@ -7,4 +7,11 @@
 - `architecture/`：当前架构设计与已接受 ADR；
 - `experience/`：当前产品体验、页面结构和交互契约。
 
+当前入口：
+
+- [领域模型与术语](domain/context.md)
+- [Integration Platform Architecture](architecture/integration-platform.md)
+- [Architecture Decision Records](architecture/adr/)
+- [Integration Control Plane Experience](experience/integration-control-plane.md)
+
 这里是当前状态的完整视图，不是 Change 历史的简单追加。归档 Change 时，应合并、替代或删除过时内容，并保留 Change 历史供追溯。
