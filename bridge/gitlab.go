@@ -130,7 +130,7 @@ func hookForm(hookURL, token string, pushEvents, issuesEvents bool) url.Values {
 	f.Set("push_events", strconv.FormatBool(pushEvents))
 	f.Set("issues_events", strconv.FormatBool(issuesEvents))
 	if token != "" {
-		f.Set("token", token)
+		f.Set("signing_token", token)
 	}
 	return f
 }
