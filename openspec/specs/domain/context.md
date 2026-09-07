@@ -32,6 +32,10 @@ _Avoid_: mutable task update, live branch tracking
 The GitLab push event that signals a merged change has been archived on `main`. It closes the execution projection and its publication Issue; it is a completion signal, not a publication entry point.
 _Avoid_: v1 publication, proposal event
 
+**Abandon Event**:
+The controlled GitLab Issue update that explicitly adds the exact `specwire::abandoned` label to an existing published change. It cancels the correlated execution projection, records the bounded abandonment reason, and closes the linked publication Issue; it is not a new publication and must never mark the projection `done`.
+_Avoid_: abandoned branch push, new lifecycle Issue, archive completion
+
 **Projection Recovery**:
 The process of observing, retrying, or manually replaying a failed integration side effect without changing the authoritative GitLab change.
 _Avoid_: rollback of source change, exactly-once execution
@@ -69,7 +73,7 @@ A registered provider family, such as GitLab or Multica, that groups supported C
 _Avoid_: a configured project mapping, a Flow node instance
 
 **ConnectorBehavior**:
-A versioned input or output capability exposed by a ConnectorType, such as GitLab Issue Hook, GitLab Push Hook, Multica Create Issue, or Multica Complete Issue. It declares its direction, parameters, data contracts, capabilities, and execution boundary, which must be provided by a pre-deployed and approved adapter.
+A versioned input or output capability exposed by a ConnectorType, such as GitLab Issue Hook, GitLab Push Hook, Multica Create Issue, Multica Complete Issue, or Multica Cancel Issue. It declares its direction, parameters, data contracts, capabilities, and execution boundary, which must be provided by a pre-deployed and approved adapter.
 _Avoid_: arbitrary user code, a complete Flow
 
 **ConnectorNode**:
@@ -97,6 +101,7 @@ The end-to-end scenario in the project diagram is a client workflow around SpecW
 1. A locally managed Skill starts a change in an agent session/worktree: it creates a `feat`/`fix` branch, runs `opsx:propose`, commits and pushes the branch, then opens a GitLab Issue with the `change` label and the `change_id`, `branch`, and `branch_head_sha` fields.
 2. The GitLab Issue Hook delivers that publication to SpecWire. SpecWire validates the event, creates the Multica execution projection with the branch context, and applies the requested initial status or assignment. Other issue platforms are outside the current supported target.
 3. Multica and the client Agent handle checkout, implementation, MR delivery, human review, and merge. These are client/execution-system responsibilities, not SpecWire Bridge behavior.
-4. The archive Skill synchronizes the merged `main`, runs the repository's archive operation, and pushes the archive event. SpecWire receives the `archived` Push Hook, completes the Multica projection, and closes the linked GitLab publication Issue.
+4. For a completed change, the archive Skill synchronizes the merged `main`, runs the repository's archive operation, and pushes the archive event. SpecWire receives the `archived` Push Hook, completes the Multica projection as `done`, and closes the linked GitLab publication Issue.
+5. Alternatively, for a change that is abandoned before completion, the abandon Skill archives the branch-local planning record and adds `specwire::abandoned` to the existing publication Issue. SpecWire receives that explicit label transition, cancels the correlated Multica projection as `cancelled`, records the reason, and closes the linked Issue. Archive and abandon are mutually exclusive terminal outcomes for one projection.
 
 The diagram's `label: change` wording means that the GitLab Issue carries the `change` label. In the canonical GitLab protocol, this is an Issue label (`labels[].title == "change"`), not a Git tag or a generic webhook field. The diagram is a scenario reference and does not make the local Skills, Agent session, review, merge, notification, or archive command part of SpecWire's runtime contract.

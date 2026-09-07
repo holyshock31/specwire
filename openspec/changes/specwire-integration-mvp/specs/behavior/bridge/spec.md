@@ -316,3 +316,8 @@ After the publication Flow creates or safely reconciles a projection, Bridge MUS
 
 - **WHEN** the same Issue Hook is delivered again to the same publication Flow
 - **THEN** the existing correlation is reused and no duplicate projection or correlation is created
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: 归档事件自动完成投影闭环`
+- TO: `### Requirement: 生命周期终态事件闭环投影`

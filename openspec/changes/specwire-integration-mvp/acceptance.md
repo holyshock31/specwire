@@ -322,3 +322,21 @@
 | L-07 | 已有 persistent 数据库在重启时不因不可变 completion 模型冲突而失败，并自动补齐 abandon Flow/route | **通过（单测 + 运行态）** | `go test ./...` 全部通过；`docker compose up -d --build bridge` 后容器稳定 `Up`，日志只有 `persistent-only cutover enabled`/`bridge listening`；数据库包含 `abandon-change` 模板、2 个已发布 `Abandon Change` Flow 和 2 条 active `gitlab.issue-abandon-hook` 路由 |
 
 本轮未重放已存在的 abandoned 标签事件，也未修改 GitLab Issue 或 Multica issue 状态；由于 abandon matcher 要求标签从不存在到新增，历史事件不会在路由补齐后自动重放。
+
+## 人工验收与归档前语义整理（2026-09-07）
+
+产品负责人已明确完成人工验收并接受 `specwire-integration-mvp` 的当前产品体验。该结论完成此前记录的视觉和主路径人工闸门，但不把未执行的自动化、真实外部副作用或归档动作伪造为已经执行；`tasks.md` 中仍未完成的自动化与归档项目继续保留原状态，供归档历史追溯。
+
+归档前按仓库文档职责完成以下语义整理：
+
+| 分类 | 当前态处理 |
+|---|---|
+| behavior | `changes/specwire-integration-mvp/specs/behavior/` 继续作为 OpenSpec delta；新增 Requirement 使用 `ADDED`，改名且修改的 Requirement 使用 `RENAMED + MODIFIED`，由 `openspec archive` 确定性合并 |
+| domain | `openspec/specs/domain/context.md` 补充 Abandon Event、Multica Cancel Issue 行为示例以及 `done`/`cancelled` 互斥终态 |
+| architecture | ADR 0006/0007 保留决策理由；`openspec/specs/architecture/integration-platform.md` 从本 Change 的技术设计提炼当前结构，不复制完整实施过程 |
+| experience | `openspec/specs/experience/integration-control-plane.md` 综合三张原型、已接受页面关系和后续交互修正，成为当前体验契约 |
+| history | `proposal.md`、`design.md`、`tasks.md`、本验收记录和 `prototype/` 保留在归档 Change 中，不直接复制为当前行为规格 |
+
+本次整理不改变产品范围或实现代码。图片与当前体验契约冲突时，published experience、published behavior 和实际实现优先；原型只承担设计溯源。
+
+归档机械可应用性已在一次性 detached worktree 中验证：`openspec validate specwire-integration-mvp --strict` 通过，`openspec archive specwire-integration-mvp -y --json` 成功应用 17 个新增、12 个修改和 2 个改名，归档结果再经 `openspec validate --all --strict` 验证为 4/4 通过。该试跑未修改正式分支、未推送归档事件，也不等同于已经完成正式归档。

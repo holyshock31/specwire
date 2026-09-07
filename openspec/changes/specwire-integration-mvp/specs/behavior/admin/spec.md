@@ -106,6 +106,44 @@ Onboarding MUST be a durable, retryable operation that can add or adopt the same
 - **WHEN** an operator reviews a dry-run with no overrides
 - **THEN** the preview shows the `change` label, the shared Issue/Push Hook using the configured public ingress, the default SSH clone URL, the `specwire-managed` marker for resources SpecWire creates, and the target project title derived from the GitLab full path
 
+### Requirement: 新建 Connection 必须显式选择端点和项目
+
+The new Connection form MUST start without a preselected GitLab instance, Group, source project, Multica instance, Workspace, or target project. Dependent selectors MUST remain unavailable until their parent selection is explicit, and the form MUST reject preview or save until all required source/target context is selected. A target project MAY remain empty only when the operator explicitly enables automatic target-project creation.
+
+#### Scenario: 新建 Connection 从空表单开始
+
+- **WHEN** an operator opens the new Connection form
+- **THEN** all endpoint and project selectors show a placeholder instead of selecting the first available record, and no Group, project, Workspace, or target-project request is issued before its parent is selected
+
+#### Scenario: 未完成显式选择时不能预览或保存
+
+- **WHEN** an operator clicks preview or save without selecting the required source and target context
+- **THEN** the form reports the missing selections and does not call Connection onboarding
+
+#### Scenario: 显式选择后才加载下级资源
+
+- **WHEN** an operator selects a GitLab instance or Multica instance, then selects each subsequent parent context
+- **THEN** the corresponding Group, source-project, Workspace, and target-project options are loaded one level at a time and remain blank until the operator chooses a value
+
+#### Scenario: 启用隐藏已绑定项目筛选
+
+- **WHEN** an operator enables the new Connection form's `隐藏当前 Workspace 已绑定的项目` option
+- **THEN** GitLab source-project and Multica target-project selectors request and display only projects not used by an active Connection in the current Workspace; disabled Connections release their project identities for selection
+
+### Requirement: 执行告警支持人工确认
+
+The admin surface MUST show the immutable execution outcome separately from its operator attention state. Failed, indeterminate, and reconciliation-required executions MUST be visibly marked as `待关注` or `已知晓`; an authorized operator MUST be able to acknowledge an actionable execution and reopen it later. Acknowledgement MUST NOT rewrite the outcome, hide the execution from history, or claim that provider recovery succeeded. Overview, alert, runtime, and Connection summaries MUST count only open actionable executions as requiring attention, while execution history continues to show acknowledged records with a subdued state and the latest actor/time.
+
+#### Scenario: 告警确认后不再重复提醒
+
+- **WHEN** an operator confirms that a failed execution is known
+- **THEN** the alert navigation/count and attention summaries no longer count it, while the execution history still shows `失败 · 已知晓` and its confirmation metadata
+
+#### Scenario: 执行详情提供恢复关注操作
+
+- **WHEN** an operator opens an acknowledged actionable execution
+- **THEN** the detail view offers `取消已知晓`, which returns it to `待关注` without changing the original execution status
+
 ## MODIFIED Requirements
 
 ### Requirement: 项目配置可视化管理
@@ -204,41 +242,3 @@ Workspace, account, provider endpoint, credential reference, Connection, resourc
 
 - **WHEN** a submitted Connection, resource, Flow, or credential reference contains an invalid value or unauthorized resource
 - **THEN** the mutation is rejected with an actionable error and no partial provider side effect is reported as successful
-
-### Requirement: 新建 Connection 必须显式选择端点和项目
-
-The new Connection form MUST start without a preselected GitLab instance, Group, source project, Multica instance, Workspace, or target project. Dependent selectors MUST remain unavailable until their parent selection is explicit, and the form MUST reject preview or save until all required source/target context is selected. A target project MAY remain empty only when the operator explicitly enables automatic target-project creation.
-
-#### Scenario: 新建 Connection 从空表单开始
-
-- **WHEN** an operator opens the new Connection form
-- **THEN** all endpoint and project selectors show a placeholder instead of selecting the first available record, and no Group, project, Workspace, or target-project request is issued before its parent is selected
-
-#### Scenario: 未完成显式选择时不能预览或保存
-
-- **WHEN** an operator clicks preview or save without selecting the required source and target context
-- **THEN** the form reports the missing selections and does not call Connection onboarding
-
-#### Scenario: 显式选择后才加载下级资源
-
-- **WHEN** an operator selects a GitLab instance or Multica instance, then selects each subsequent parent context
-- **THEN** the corresponding Group, source-project, Workspace, and target-project options are loaded one level at a time and remain blank until the operator chooses a value
-
-#### Scenario: 启用隐藏已绑定项目筛选
-
-- **WHEN** an operator enables the new Connection form's `隐藏当前 Workspace 已绑定的项目` option
-- **THEN** GitLab source-project and Multica target-project selectors request and display only projects not used by an active Connection in the current Workspace; disabled Connections release their project identities for selection
-
-### Requirement: 执行告警支持人工确认
-
-The admin surface MUST show the immutable execution outcome separately from its operator attention state. Failed, indeterminate, and reconciliation-required executions MUST be visibly marked as `待关注` or `已知晓`; an authorized operator MUST be able to acknowledge an actionable execution and reopen it later. Acknowledgement MUST NOT rewrite the outcome, hide the execution from history, or claim that provider recovery succeeded. Overview, alert, runtime, and Connection summaries MUST count only open actionable executions as requiring attention, while execution history continues to show acknowledged records with a subdued state and the latest actor/time.
-
-#### Scenario: 告警确认后不再重复提醒
-
-- **WHEN** an operator confirms that a failed execution is known
-- **THEN** the alert navigation/count and attention summaries no longer count it, while the execution history still shows `失败 · 已知晓` and its confirmation metadata
-
-#### Scenario: 执行详情提供恢复关注操作
-
-- **WHEN** an operator opens an acknowledged actionable execution
-- **THEN** the detail view offers `取消已知晓`, which returns it to `待关注` without changing the original execution status

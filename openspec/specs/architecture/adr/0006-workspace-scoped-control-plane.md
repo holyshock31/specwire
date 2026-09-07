@@ -36,4 +36,4 @@ SpecWire owns a Workspace-scoped integration control plane with the following bo
 
 ## Non-Consequences
 
-This ADR does not define API payloads, onboarding states, Multica default values, hook event filters, resource URLs, role permissions, adapter contracts, or migration steps. Those are defined in `openspec/changes/specwire-integration-mvp/` until implemented and archived into the current behavior specs.
+This ADR does not define API payloads, onboarding states, Multica default values, hook event filters, resource URLs, role permissions, adapter contracts, or migration steps. Current observable contracts belong in `openspec/specs/behavior/` and `openspec/specs/experience/`; the archived `specwire-integration-mvp` Change preserves the detailed design and implementation history.
